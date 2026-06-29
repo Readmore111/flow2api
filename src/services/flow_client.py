@@ -74,6 +74,9 @@ class FlowClient:
         Returns:
             User-Agent 字符串
         """
+        if not hasattr(self, "_user_agent_cache"):
+            self._user_agent_cache = {}
+
         # 如果没有提供账号ID，生成随机UA
         if not account_id:
             account_id = f"random_{random.randint(1, 999999)}"
@@ -100,13 +103,23 @@ class FlowClient:
         
         return user_agent
 
+    def _get_request_fingerprint_ctx(self) -> contextvars.ContextVar[Optional[Dict[str, Any]]]:
+        ctx = getattr(self, "_request_fingerprint_ctx", None)
+        if ctx is None:
+            ctx = contextvars.ContextVar(
+                "flow_request_fingerprint",
+                default=None
+            )
+            self._request_fingerprint_ctx = ctx
+        return ctx
+
     def _set_request_fingerprint(self, fingerprint: Optional[Dict[str, Any]]):
         """设置当前请求链路的浏览器指纹上下文。"""
-        self._request_fingerprint_ctx.set(dict(fingerprint) if fingerprint else None)
+        self._get_request_fingerprint_ctx().set(dict(fingerprint) if fingerprint else None)
 
     def get_request_fingerprint(self) -> Optional[Dict[str, Any]]:
         """获取当前请求链路绑定的浏览器指纹快照。"""
-        fingerprint = self._request_fingerprint_ctx.get()
+        fingerprint = self._get_request_fingerprint_ctx().get()
         if not isinstance(fingerprint, dict) or not fingerprint:
             return None
         return dict(fingerprint)
@@ -369,7 +382,7 @@ class FlowClient:
         impersonate: str = "chrome124",
     ) -> Dict[str, Any]:
         """统一HTTP请求处理"""
-        fingerprint = self._request_fingerprint_ctx.get()
+        fingerprint = self._get_request_fingerprint_ctx().get()
 
         proxy_url = None
         if not force_no_proxy:
@@ -589,7 +602,7 @@ class FlowClient:
         impersonate: str = "chrome124",
     ) -> str:
         """执行原始文本请求（如 SSE），返回响应文本。"""
-        fingerprint = self._request_fingerprint_ctx.get()
+        fingerprint = self._get_request_fingerprint_ctx().get()
 
         proxy_url = None
         if not force_no_proxy:
@@ -938,6 +951,10 @@ class FlowClient:
         """构造当前上游真实抓包风格的视频提交头。"""
         return self._build_current_flow_media_headers(content_type="text/plain;charset=UTF-8")
 
+    def _build_realistic_image_submit_headers(self) -> Dict[str, str]:
+        """构造当前上游真实抓包风格的图片提交头。"""
+        return self._build_current_flow_media_headers(content_type="text/plain;charset=UTF-8")
+
     def _resolve_runtime_impersonate(self, fallback: str = "chrome124") -> str:
         resolved = self._resolve_impersonate_from_fingerprint(fallback=fallback)
         return resolved or fallback
@@ -1049,13 +1066,14 @@ class FlowClient:
         token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """图片生成请求使用更短超时，并在网络超时时快速重试。"""
+        raw_body = self._compact_json_dumps(json_data)
         request_timeout = config.flow_image_request_timeout
         total_attempts = max(1, config.flow_image_timeout_retry_count + 1)
         retry_delay = config.flow_image_timeout_retry_delay
 
         # 对于浏览器/远程浏览器打码链路，优先保持与打码时一致的出口。
         # 否则在首跳改走媒体代理时，容易触发 reCAPTCHA 校验失败并放大长尾。
-        fingerprint = self._request_fingerprint_ctx.get()
+        fingerprint = self._get_request_fingerprint_ctx().get()
         has_fingerprint_context = bool(isinstance(fingerprint, dict) and fingerprint)
 
         has_media_proxy = False
@@ -1140,13 +1158,17 @@ class FlowClient:
                     result = await self._make_request(
                         method="POST",
                         url=url,
-                        headers=self._build_labs_request_context_headers(project_id),
+                        headers=self._build_realistic_image_submit_headers(),
                         json_data=json_data,
+                        raw_body=raw_body,
                         use_at=True,
                         at_token=at,
                         timeout=request_timeout,
                         use_media_proxy=prefer_media_proxy,
                         respect_fingerprint_proxy=not prefer_media_proxy,
+                        allow_urllib_fallback=False,
+                        apply_default_client_headers=False,
+                        impersonate=self._resolve_runtime_impersonate(),
                     )
                 if http_attempt_info is not None:
                     http_attempt_info["duration_ms"] = int((time.time() - http_attempt_started_at) * 1000)
@@ -4720,7 +4742,7 @@ class FlowClient:
             # "reCAPTCHA evaluation failed"。其他 Client Hint (sec-ch-ua-platform 等)
             # 由 _make_request 根据 UA 自动推断 (Windows → "Windows", etc.)。
             if captcha_user_agent:
-                existing_fp = self._request_fingerprint_ctx.get()
+                existing_fp = self._get_request_fingerprint_ctx().get()
                 merged_fp = dict(existing_fp) if isinstance(existing_fp, dict) else {}
                 merged_fp["user_agent"] = captcha_user_agent
                 self._set_request_fingerprint(merged_fp)

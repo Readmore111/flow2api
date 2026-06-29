@@ -497,6 +497,7 @@ async function generate() {
     const decoder = new TextDecoder();
     let fullContent = "";
     let buffer = "";
+    let streamError = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -515,6 +516,7 @@ async function generate() {
           const parsed = JSON.parse(data);
           if (parsed.error) {
             appendLog(`\n❌ 错误: ${JSON.stringify(parsed.error)}\n`);
+            streamError = parsed.error;
             continue;
           }
           const choices = parsed.choices || [];
@@ -530,6 +532,10 @@ async function generate() {
           // skip unparseable chunks
         }
       }
+    }
+
+    if (streamError) {
+      throw new Error(JSON.stringify(streamError));
     }
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
