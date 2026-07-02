@@ -53,6 +53,10 @@
 - Known risk:
   - The code fix is durable, but the current production proxy path depends on the Windows host local proxy and SSH reverse tunnel staying alive. If that local proxy/tunnel stops, the VPS direct Docker browser may again hit Flow unusual-activity risk scoring.
   - For a long-running production setup, replace the temporary tunnel with a stable server-reachable browser proxy or a trusted remote-browser service. Do not write API keys, ST/AT values, Google cookies, or proxy credentials into docs.
+- Follow-up causal check:
+  - The earlier user-account/token-scope deployment (`c11d11e` plus startup fix `20cf2c9`) did not modify `src/services/flow_client.py` or `src/services/browser_captcha_personal.py`, the modules that own the 48% Flow image submit path.
+  - That deployment did modify Token routing and request orchestration, so it could change which Token/API-client pool is selected. However, a routing bug would normally show up as no-token, forbidden/unbound pool, cooldown, or concurrency errors near the start of a request, not as progress `48%` with upstream `reCAPTCHA evaluation failed`.
+  - The deployment did recreate the container/browser runtime, which likely exposed the pre-existing personal-mode mixed submit path, stale browser-context cookie injection, and missing `google_cookies` binding issues. In that sense, the timing was meaningful, but the user-group feature itself was not the direct Flow submit failure mechanism.
 
 ## 2026-07-02 - Server-side mihomo proxy and Flow-aware failover
 
