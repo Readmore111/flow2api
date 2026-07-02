@@ -1,5 +1,547 @@
 # Worklog
 
+## 2026-07-02 - User console accounts and scoped Token visibility
+
+- Purpose: Convert the admin API-client feature into real user console accounts with login passwords, scoped Token/log visibility, read-only user plugin configuration, and multi-image testing.
+- Files changed:
+  - `src/api/admin.py`
+  - `src/core/database.py`
+  - `src/core/models.py`
+  - `src/main.py`
+  - `src/services/load_balancer.py`
+  - `src/services/token_manager.py`
+  - `static/manage.html`
+  - `static/test.html`
+  - `tests/test_user_account_scope.py`
+  - `tests/test_api_client_admin_auth.py`
+  - `tests/test_api_client_pool.py`
+  - `tests/test_test_page_preview.js`
+- Behavior changed:
+  - Removed the top-right GitHub link from the management UI.
+  - Added ordinary console-user login through `ApiClient.username` and a bcrypt `password_hash`; created users get generated API Keys and personal plugin connection tokens.
+  - Admin sessions keep full visibility; ordinary users only see their own plugin-imported Tokens and Token-owned request logs/statistics.
+  - Ordinary users cannot access the user-management page or Token-pool binding APIs; only admin can create users and bind Token pools.
+  - User system settings now expose only the user API Key and read-only plugin connection configuration.
+  - User plugin imports set `tokens.owner_client_id` and automatically add a binding for that user; admin still sees all Tokens.
+  - API clients with no explicit Token bindings now have an empty pool instead of falling back to the admin/global pool.
+  - `/test` can generate 1-4 images from one reference image plus prompt by issuing sequential generation requests.
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_pool.ApiClientPoolTests.test_unbound_client_does_not_use_default_admin_pool -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_user_account_scope -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_admin_auth -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_user_account_scope tests.test_api_client_admin_auth tests.test_api_client_pool tests.test_plugin_account_import -v`
+  - `node tests\test_test_page_preview.js`
+  - `node tests\test_extension_import_helpers.js`
+  - Inline script syntax check for `static/manage.html` and `static/test.html` with Node `new Function`.
+- Verification result:
+  - The new unbound-client test first failed because an unbound client selected an admin/global Token; after the fix it passed.
+  - User account scope tests passed: 6 tests.
+  - API-client admin auth tests passed: 5 tests.
+  - Combined backend suite passed: 25 tests.
+  - Frontend preview extraction, extension import helper checks, and HTML inline script syntax checks passed.
+- Deployment result: Not deployed in this session.
+- Known risk or follow-up:
+  - Full repository test suite was not run; this session used targeted tests around account scoping, Token routing, plugin import, and the test page.
+  - Existing working tree had unrelated modified/untracked files before this work; they were preserved.
+
+## 2026-07-02 - Structured retry metadata for AliExpress AI pre-generation
+
+- Purpose: Coordinate Flow2API with the AliExpress batch-publish automation so temporary image-generation failures such as Token cooldown, no available Token, local concurrency full, and upstream 5xx errors can be retried instead of being treated as final failures.
+- Files changed:
+  - `src/services/generation_handler.py`
+  - `tests/test_generation_concurrency.py`
+- Behavior changed:
+  - `_create_error_response()` now includes structured retry metadata: `error.code`, `error.retryable`, `error.retry_after_ms`, and optional `error.status_text`.
+  - Local image concurrency exhaustion returns `429` with `code="concurrency_full"`, `retryable=true`, and a retry-after hint.
+  - No available Token and Token cooldown responses return `503` with `code="no_token_available"` or `code="token_cooling_down"` and `retryable=true`.
+  - Token AT invalid/refresh failure returns `503` with `code="token_at_invalid"` and `retryable=true`.
+  - Account tier/model eligibility failures return `403` with `code="account_tier_unsupported"` and `retryable=false`.
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_generation_concurrency.GenerationConcurrencyTests.test_image_request_waits_and_fails_when_token_concurrency_is_full tests.test_generation_concurrency.GenerationConcurrencyTests.test_no_available_token_error_includes_retry_metadata`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_generation_concurrency`
+  - `.\venv\Scripts\python.exe -m py_compile src\services\generation_handler.py`
+  - SSH production preflight: `docker compose -f /opt/flow2api/docker-compose.prod.yml ps`.
+  - Remote `python3 -m py_compile /opt/flow2api/app/src/services/generation_handler.py`.
+  - Production rebuild: `docker compose -f /opt/flow2api/docker-compose.prod.yml up -d --build --force-recreate flow2api`.
+  - Production health check against `https://niktokfurniture.com/health`.
+  - Container SHA256 check for `/app/src/services/generation_handler.py`.
+  - Production log check: `docker compose -f /opt/flow2api/docker-compose.prod.yml logs --tail=80 flow2api`.
+- Verification result:
+  - New tests first failed with `generation_failed` instead of the expected structured codes.
+  - After implementation, targeted tests passed.
+  - Full `tests.test_generation_concurrency` passed: 4 tests.
+  - Python compile check passed.
+  - Remote compile check passed.
+  - Production health returned `backend_running=true`, `total_tokens=9`, and `active_tokens=9`.
+  - The deployed container file hash matched the local `generation_handler.py` hash.
+  - Production startup logs showed normal database migration checks, browser captcha initialization, background tasks, and `/health` 200.
+- Deployment result:
+  - Deployed `src/services/generation_handler.py` to production VPS at `/opt/flow2api/app`.
+  - Backed up the replaced production file under `/opt/flow2api/backups/20260702-101854/src/services/generation_handler.py`.
+  - Rebuilt and force-recreated the `flow2api` container with `/opt/flow2api/docker-compose.prod.yml`; `flow2api-caddy` stayed running.
+- Known risk or follow-up: The AliExpress automation companion change must also be deployed through its Worker/module release path before the desktop automation can fully consume this retry metadata in production.
+
+## 2026-07-01 - Token failure cooldown routing
+
+- Purpose: Optimize Token load balancing so a Token that just failed is temporarily skipped for a short period instead of being selected again immediately.
+- Behavior changed:
+  - Added `tokens.cooldown_until` as a soft-disable timestamp.
+  - When a generation request log is finalized with a Token-level failure (`status_code >= 500`, or non-local-concurrency `429`), the Token is put into a random 60-180 second cooldown.
+  - Load balancing skips Tokens whose `cooldown_until` is still in the future.
+  - A request that explicitly pins a cooling Token with `x-flow2api-token-id` cannot bypass the cooldown; it gets the normal no-token path.
+  - Manual/long-term disable behavior still uses `is_active`, `ban_reason`, and `banned_at`.
+  - `/api/tokens` now returns `cooldown_until`, and the admin Token table shows active cooling Tokens as `冷却`.
+- Files changed:
+  - `src/core/models.py`
+  - `src/core/database.py`
+  - `src/services/token_manager.py`
+  - `src/services/load_balancer.py`
+  - `src/services/generation_handler.py`
+  - `src/api/admin.py`
+  - `static/manage.html`
+  - `tests/test_api_client_pool.py`
+  - `tests/test_generation_concurrency.py`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_pool -v` first failed on the new cooldown selection tests, then passed after implementation.
+  - `.\venv\Scripts\python.exe -m unittest tests.test_generation_concurrency.GenerationConcurrencyTests.test_failed_request_log_triggers_token_failure_cooldown -v` first failed, then passed after implementation.
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_pool tests.test_generation_concurrency tests.test_daily_stats_reset -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_token_manager_refresh -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_admin_auth -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\core\models.py src\core\database.py src\services\token_manager.py src\services\load_balancer.py src\services\generation_handler.py src\api\admin.py`
+  - Inline script syntax check for `static/manage.html`.
+  - `git diff --check` on the touched runtime/test/doc files.
+  - Remote `python3 -m py_compile` for deployed Python files.
+  - Production health check against `https://niktokfurniture.com/health`.
+  - Production SQLite schema check for `tokens.cooldown_until`.
+- Verification result:
+  - API-client pool tests passed: 9 tests.
+  - Generation concurrency/cooldown tests passed: 3 tests.
+  - Daily stats tests passed: 3 tests.
+  - Token refresh tests passed: 3 tests.
+  - API-client admin auth tests passed: 4 tests.
+  - Python compile checks passed locally and remotely.
+  - Static manage page script check passed for 3 scripts.
+  - `git diff --check` exited 0 with only line-ending warnings.
+  - Production health returned `backend_running=true`, `total_tokens=5`, `active_tokens=5`.
+  - Production database has `tokens.cooldown_until`.
+- Deployment:
+  - Deployed the 7 runtime files listed above to production.
+  - Backed up replaced production files under `/opt/flow2api/backups/20260701-152301`.
+  - Rebuilt and force-recreated the `flow2api` container with `/opt/flow2api/docker-compose.prod.yml`; `flow2api-caddy` stayed running.
+- Known risk or follow-up:
+  - Cooldown is intentionally a soft routing exclusion, not `is_active=false`, so manually enabled Tokens are not permanently disabled by ordinary transient failures.
+  - Local concurrency-full responses (`status_text="concurrency_full"`) are excluded from cooldown to avoid punishing a healthy but busy Token.
+
+## 2026-07-01 - Request-log based error counters deployed
+
+- Purpose: Fix incorrect `今日错误/总错误` counters on the admin dashboard and Token operational list after production request logs showed more failed requests than `token_stats` reported.
+- Root cause:
+  - Production `request_logs` contained 19 total failed rows and 17 failed rows for 2026-07-01 (`status_code >= 400`), while `token_stats` still showed near-zero error counters.
+  - The UI was reading dashboard and per-Token error counters from `token_stats`, a derived table that can drift when failure paths or historical data do not update it consistently.
+- Behavior changed:
+  - `Database.get_dashboard_stats()` now derives `total_errors` and `today_errors` directly from `request_logs` where `status_code >= 400`.
+  - `Database.get_all_tokens_with_stats()` now derives per-Token `error_count`, `today_error_count`, and `last_error_at` from `request_logs`.
+  - Image/video success counters still use `token_stats`; `consecutive_error_count` still uses `token_stats` for auto-ban behavior.
+- Files changed:
+  - `src/core/database.py`
+  - `tests/test_daily_stats_reset.py`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_daily_stats_reset -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_pool -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_admin_auth -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\core\database.py`
+  - Production health check against `https://niktokfurniture.com/health`.
+  - In-container production check calling `Database.get_dashboard_stats()` and `Database.get_all_tokens_with_stats()`.
+- Verification result:
+  - New regression test failed first with `stats["total_errors"] == 0`, then passed after the query change.
+  - Daily stats tests passed: 3 tests.
+  - API-client pool tests passed: 7 tests.
+  - API-client admin auth tests passed: 4 tests.
+  - Python compile check passed.
+  - Production health returned `backend_running=true`, `total_tokens=5`, `active_tokens=5`.
+  - Production stats now report `today_errors=17` and `total_errors=19`, matching the request-log aggregation.
+- Deployment:
+  - Deployed `src/core/database.py` to production.
+  - Backed up the replaced file under `/opt/flow2api/backups/20260701-144735/src/core/database.py`.
+  - Rebuilt and force-recreated the `flow2api` container with `/opt/flow2api/docker-compose.prod.yml`; `flow2api-caddy` stayed running.
+- Known risk or follow-up:
+  - Dashboard total errors intentionally include failed logs with no Token assigned; per-Token error totals exclude those rows.
+  - Historical successful image/video counters still depend on `token_stats`; only error counters were moved to request-log aggregation in this change.
+
+## 2026-07-01 - S-UI VLESS Reality node on production VPS
+
+- Purpose: Install an S-UI-managed VLESS Reality node on the existing production VPS following the referenced Bulianglin S-UI 1.2.2 guide, without disrupting the existing Flow2API/Caddy deployment.
+- Server changes:
+  - Installed S-UI `1.2.2` under `/usr/local/s-ui` on VPS `15.204.119.78`.
+  - Created a VLESS Reality inbound with tag `vless-reality-8443` on TCP port `8443`.
+  - Used Reality target/SNI `www.microsoft.com` and client fingerprint `chrome`.
+  - Stored generated node material and panel credentials only in root-readable files under `/root/s-ui-secret/`.
+  - Bound S-UI panel and subscription services to `127.0.0.1:2095` and `127.0.0.1:2096` respectively.
+  - Added UFW allow rule for `8443/tcp` and explicit deny rules for public `2095/tcp` and `2096/tcp`.
+- Important server paths:
+  - S-UI runtime: `/usr/local/s-ui`
+  - S-UI database: `/usr/local/s-ui/db/s-ui.db`
+  - Secret material directory: `/root/s-ui-secret/`
+  - Node link file: `/root/s-ui-secret/vless-link.txt` (do not copy contents into docs)
+  - Node metadata file: `/root/s-ui-secret/vless.env` (contains proxy credentials; do not copy contents into docs)
+  - Panel metadata file: `/root/s-ui-secret/panel.env` (contains admin credentials; do not copy contents into docs)
+- Commands and checks run:
+  - SSH preflight to `ubuntu@15.204.119.78`.
+  - Remote port/firewall checks with `ss`, `ufw status verbose`, and Docker container listing.
+  - Installed S-UI with the guide's installer: `VERSION=1.2.2 && bash <(curl -Ls https://raw.githubusercontent.com/bulianglin/demo/main/s-ui-install.sh) $VERSION`.
+  - Provisioned the VLESS Reality inbound/client through S-UI's SQLite database and restarted `s-ui`.
+  - Converted S-UI JSON columns to SQLite BLOB values after discovering S-UI 1.2.2 cannot scan TEXT JSON into `json.RawMessage`.
+  - Removed explicit TCP `transport` from the VLESS inbound after sing-box rejected `transport: {type: tcp}`; plain TCP is represented by omitting the transport block.
+  - Verified `https://niktokfurniture.com/health`.
+- Verification result:
+  - `s-ui` is active.
+  - `ss -tulpn` shows S-UI panel on `127.0.0.1:2095`, subscription on `127.0.0.1:2096`, and VLESS inbound on `*:8443`.
+  - UFW allows `8443/tcp` and explicitly denies public `2095/tcp` and `2096/tcp`.
+  - `Test-NetConnection 15.204.119.78 -Port 8443` returned `TcpTestSucceeded=True`.
+  - Flow2API production health stayed healthy with `backend_running=true`.
+  - Existing Docker containers `flow2api` and `flow2api-caddy` remained up; 80/443 were not changed.
+- Known risk or follow-up:
+  - Full client authentication was not verified with v2rayN/NekoBox/Shadowrocket in this session; plain TCP/HTTP probes against Reality produce expected `REALITY: processed invalid connection` log entries.
+  - If the node does not work in a client, first try changing Reality SNI/fingerprint as the referenced guide suggests.
+  - Keep all generated node links, UUIDs, Reality keys, panel credentials, and subscription material out of repository docs.
+
+## 2026-07-01 - Per-Token hard concurrency slots for generation
+
+- Purpose: Make Token image/video concurrency limits enforceable instead of only informational, so one Flow account is not hit by many simultaneous image-to-image jobs.
+- Behavior changed:
+  - `GenerationHandler.handle_generation` now acquires a per-Token hard concurrency slot after Token selection and before AT/project/generation work.
+  - Image requests use `ConcurrencyManager.wait_acquire_image()` with `config.flow_image_slot_wait_timeout`.
+  - Video requests use `ConcurrencyManager.wait_acquire_video()` with `config.flow_video_slot_wait_timeout`.
+  - If no slot becomes available before timeout, the API returns a `429` error with a clear Token concurrency message and does not call the upstream Flow generation API.
+  - Slots are released from `finally`, covering success, failure, timeout, and client cancellation paths.
+  - Existing `slot_wait_ms` perf traces now keep the real wait duration instead of being reset to `0` inside image/video handlers.
+- Files changed:
+  - `src/services/generation_handler.py`
+  - `tests/test_generation_concurrency.py`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_generation_concurrency -v`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_generation_concurrency tests.test_api_client_pool -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\services\generation_handler.py src\services\concurrency_manager.py src\services\load_balancer.py`
+  - `git diff --check`
+  - `.\venv\Scripts\python.exe -m unittest discover -s tests -v`
+  - Remote `python3 -m py_compile src/services/generation_handler.py`.
+  - Production rebuild: `docker compose -f /opt/flow2api/docker-compose.prod.yml up -d --build --force-recreate flow2api`.
+  - Production health check against `https://niktokfurniture.com/health`.
+  - Remote SHA256 check for `/opt/flow2api/app/src/services/generation_handler.py`.
+- Verification result:
+  - New targeted concurrency tests passed: 2 tests.
+  - Related routing/concurrency tests passed: 9 tests.
+  - Python compile checks passed locally and remotely.
+  - `git diff --check` exited 0 with only Git line-ending warnings.
+  - Full local unittest discover ran 63 tests: 62 passed and 1 existing unrelated error remains in `tests/test_veo_lite_support.py::VeoLiteFlowClientTests::test_check_video_status_uses_media_payload_and_normalizes_response`, failing with `KeyError: 'fifeUrl'`.
+  - Production health returned `backend_running=true`, `total_tokens=5`, `active_tokens=5`, `captcha_method=personal`.
+  - Remote file hash matched the local `src/services/generation_handler.py` hash.
+- Deployment:
+  - Deployed `src/services/generation_handler.py` to production VPS at `/opt/flow2api/app`.
+  - Backed up the replaced production file under `/opt/flow2api/backups/20260701-033921`.
+  - Rebuilt and force-recreated the `flow2api` container; `flow2api-caddy` stayed running.
+- Known risk or follow-up:
+  - `flow.image_slot_wait_timeout` controls how long requests wait when a Token is full; current production behavior follows the server config.
+  - The known video `fifeUrl` test failure remains outside this change.
+
+## 2026-06-30 - API client detail/delete controls and test page preview hardening
+
+- Purpose: Update the `用户/API Key` admin page so admins can view user details, reveal the full API Key on demand, and delete users; fix `/test` result preview cases that still missed generated images.
+- Backend changes:
+  - Added `GET /api/clients/{client_id}` to return one API client with the full API Key and current Token bindings.
+  - Added `DELETE /api/clients/{client_id}` and a database helper that deletes API-client Token bindings before deleting the client.
+  - Changed API-client list serialization to always mask keys, including short custom keys; full keys are only returned by create/detail responses.
+- Frontend changes:
+  - Added row actions for `详情` and `删除` in `static/manage.html`.
+  - Added a user detail modal with status, usage, quota, timestamps, current bindings, full API Key display, copy action, delete action, and jump-to-bind action.
+  - Hardened `static/test.html` media extraction for Flow image URLs without file extensions, OpenAI non-stream `message.content`, and Gemini `fileData` / `inlineData` image parts.
+  - Added a JSON/non-event-stream fallback in the test page generation flow so preview still renders if the endpoint returns a normal JSON payload.
+- Files changed:
+  - `src/api/admin.py`
+  - `src/core/database.py`
+  - `static/manage.html`
+  - `static/test.html`
+  - `tests/test_api_client_admin_auth.py`
+  - `tests/test_test_page_preview.js`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_admin_auth tests.test_api_client_pool -v`
+  - `node tests\test_test_page_preview.js`
+  - `.\venv\Scripts\python.exe -m py_compile src\core\database.py src\api\admin.py`
+  - Inline script syntax check for `static/manage.html` and `static/test.html`.
+  - `git diff --check`
+  - `.\venv\Scripts\python.exe -m unittest discover -s tests -v`
+  - Local health check against `http://127.0.0.1:8001/health`.
+  - SSH production preflight: `docker compose -f /opt/flow2api/docker-compose.prod.yml ps`.
+  - Remote SHA256 verification for the 4 uploaded runtime files.
+  - Remote `python3 -m py_compile src/api/admin.py src/core/database.py`.
+  - Production rebuild: `docker compose -f docker-compose.prod.yml up -d --build --force-recreate flow2api`.
+  - Production health check against `https://niktokfurniture.com/health`.
+  - Production unauthenticated route check for `https://niktokfurniture.com/api/clients/1`.
+  - Container file checks for the new admin detail/delete UI and test-page preview helpers.
+- Verification result:
+  - API-client/admin targeted tests passed: 11 tests.
+  - Test-page preview extraction Node check passed.
+  - Python compile check passed.
+  - Static inline script syntax check passed for 3 scripts in `static/manage.html` and 1 script in `static/test.html`.
+  - `git diff --check` exited 0 with only Git line-ending warnings.
+  - Full unittest discover ran 61 tests: 60 passed and 1 existing unrelated error remains in `tests/test_veo_lite_support.py::VeoLiteFlowClientTests::test_check_video_status_uses_media_payload_and_normalizes_response`, failing with `KeyError: 'fifeUrl'`.
+  - Local preview server on port 8001 returned healthy status.
+  - Production health returned `backend_running=true`, `total_tokens=3`, `active_tokens=3`, `captcha_method=personal`.
+  - Production `/api/clients/1` returned HTTP 401 without auth, confirming the new route is registered and protected.
+  - Production container contains `clientDetailModal`, `openClientDetail`, `deleteApiClient`, `extractMediaFromApiPayload`, `flow-content` URL matching, and JSON/non-event-stream fallback code.
+- Deployment:
+  - Deployed to production VPS at `/opt/flow2api/app`.
+  - Backed up the replaced production files under `/opt/flow2api/backups/20260630-223743`.
+  - Uploaded `src/api/admin.py`, `src/core/database.py`, `static/manage.html`, and `static/test.html`.
+  - Rebuilt and force-recreated the `flow2api` container; `flow2api-caddy` stayed running.
+  - Started a local preview instance with the latest code at `http://127.0.0.1:8001`; the pre-existing `python main.py` process on port 8000 was left untouched.
+- Known risk or follow-up:
+  - Full API Keys are intentionally available in the admin detail modal. Keep admin session access restricted and do not paste full keys into docs or chats.
+  - The known video `fifeUrl` test failure remains outside this change.
+
+## 2026-06-30 - Captcha Worker imports Google Cookies for protocol mode
+
+- Purpose: Improve the Chrome extension `Flow2API Captcha Worker` so account import can also collect Google Cookies and enable protocol-mode ST auto-refresh automatically.
+- User-facing changes:
+  - Extension version bumped from `1.0.0` to `1.0.1`.
+  - Extension now requests Google host permissions for `google.com` / `*.google.com` so it can read account login cookies.
+  - When clicking `导入当前 Flow 账号`, the extension still reads the Labs session token and project ID, and now also reads allowlisted Google Cookies from `accounts.google.com`, `www.google.com`, and `myaccount.google.com`.
+  - If required Google Cookies are found, the extension sends `protocol_mode="protocol"` and `google_cookies` to `/api/plugin/update-token`.
+  - If Google Cookies cannot be read, import falls back to the previous session-only mode and shows that in the status text.
+  - Options page text now explains that account import syncs Google Cookies for protocol auto-refresh.
+- Implementation details:
+  - Added reusable import helpers for Google cookie serialization, protocol-cookie detection, and plugin import payload construction.
+  - Filtered exported cookies to the Google auth cookies needed for protocol refresh instead of sending every Google cookie.
+  - Kept the backend unchanged because `/api/plugin/update-token` already accepts `protocol_mode`, `google_cookies`, and related fields.
+- Files changed:
+  - `extension/manifest.json`
+  - `extension/options.html`
+  - `extension/options.js`
+  - `extension/import_helpers.js`
+  - `tests/test_extension_import_helpers.js`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Deployment:
+  - Copied updated extension files into `/opt/flow2api/app/extension` on the VPS for consistency.
+  - No service restart was required because this is an unpacked extension/static source update, not a running backend change.
+- Verification run:
+  - `node tests\test_extension_import_helpers.js`
+  - `node -c extension\options.js`
+  - `node -c extension\import_helpers.js`
+  - JSON parse check for `extension/manifest.json`
+  - `.\venv\Scripts\python.exe -m unittest tests.test_plugin_account_import -v`
+- Verification result:
+  - New extension helper test failed first with `serializeGoogleCookies is not a function`, then passed after implementation.
+  - Extension JS syntax checks passed.
+  - Manifest JSON check passed.
+  - Backend plugin import tests passed: 4 tests.
+- Known risk or follow-up:
+  - Existing installed Chrome extensions must be reloaded from `chrome://extensions` for the new `*.google.com` permission and version `1.0.1` to take effect.
+  - On reload, Chrome may ask to approve the new Google host permission.
+  - Cookies remain sensitive login material; do not paste them into chats or docs.
+
+## 2026-06-30 - AT refresh diagnostics, keepalive hardening, and test page saves
+
+- Purpose: Diagnose why `goodv1978@gmail.com` could not refresh AT, improve Token keepalive behavior, and upgrade the `/test` image-to-image page controls.
+- Production diagnosis:
+  - Checked production SQLite state for `goodv1978@gmail.com` without exposing ST/AT values.
+  - Token ID 2 was inactive, had `auto_refresh_enabled=1`, `protocol_mode=session`, no Google Cookies, no 429 ban reason, and no recent request-log failures.
+  - Direct ST-to-AT conversion succeeded for that account, returning a future AT expiry.
+  - The returned AT failed the Flow `/credits` validation call with upstream HTTP 401 `invalid authentication credentials`.
+  - Other accounts on the same server and code path passed ST-to-AT and `/credits`, so the issue is isolated to that account/session rather than global network, proxy, or deployment state.
+- Backend changes:
+  - AT refresh failures now persist a readable sanitized reason in `last_st_refresh_result`.
+  - Tokens disabled because all AT/ST refresh attempts failed are marked with `ban_reason="at_refresh_failed"` and `banned_at`.
+  - Successful AT refresh clears `ban_reason`, clears `banned_at`, re-enables the Token, and records success.
+  - Protocol-mode keepalive can retry inactive Tokens whose disable reason is `at_refresh_failed`; a successful protocol refresh re-enables them.
+  - The background refresh loop now also proactively refreshes active session-mode Tokens when their AT is near expiry.
+  - Manual `/api/tokens/{token_id}/refresh-at` failures now include the persisted refresh reason in the HTTP error detail.
+- Test page changes:
+  - Default model changed to `gemini-3.1-flash-image-square`.
+  - Added a `保存默认模型` button backed by browser `localStorage`.
+  - Added editable prompt template title/content and a `保存模板` button backed by browser `localStorage`.
+  - Result preview now extracts images/videos from Markdown, HTML, plain URLs, relative URLs, data URLs, and common JSON fields such as `url`, `image_url`, `b64_json`, and `fifeUrl`.
+- Files changed:
+  - `src/services/token_manager.py`
+  - `src/api/admin.py`
+  - `static/test.html`
+  - `tests/test_token_manager_refresh.py`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Deployment:
+  - Copied changed files to the VPS and into `/opt/flow2api/app`.
+  - Rebuilt and recreated the production `flow2api` container with `docker compose -f /opt/flow2api/docker-compose.prod.yml up -d --build flow2api`.
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_token_manager_refresh -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\services\token_manager.py`
+  - `.\venv\Scripts\python.exe -m py_compile src\api\admin.py`
+  - `node -e` static script parse for `static/test.html`.
+  - `.\venv\Scripts\python.exe -m unittest discover -s tests -v`
+  - Online health check against `https://niktokfurniture.com/health`.
+  - Authenticated online `/test` fetch confirmed the new default model, save-model button, save-template button, template title input, media parser, and `x-flow2api-token-id` header support are present.
+  - Online manual refresh for Token ID 2 returned the expected 500 detail with upstream HTTP 401 and persisted `ban_reason="at_refresh_failed"`.
+- Verification result:
+  - New Token refresh tests passed locally.
+  - Python compile checks passed locally and on the VPS before rebuild.
+  - Test page script syntax check passed.
+  - Online deployment checks passed.
+  - Full local unittest discover result: 59 passing, 1 pre-existing unrelated failure.
+- Known risk or follow-up:
+  - Pure session-mode Tokens without Google Cookies cannot be made truly permanent; they can keep AT fresh while the ST remains valid, but if the Google session loses valid AISandbox auth they must be re-imported or upgraded to protocol-mode with fresh Google Cookies.
+  - `goodv1978@gmail.com` needs a fresh account import/login session; current ST can produce an AT but that AT is rejected by the upstream Flow API.
+  - Full test suite still has the pre-existing unrelated failure in `tests/test_veo_lite_support.py::VeoLiteFlowClientTests::test_check_video_status_uses_media_payload_and_normalizes_response`, failing with `KeyError: 'fifeUrl'`.
+  - The new test file is useful locally; production Docker images exclude `tests/` via `.dockerignore`, so run tests before deploying.
+
+## 2026-06-30 - Token groups and upgraded image test page
+
+- Purpose: Let admins organize Tokens by custom groups and make the test page usable as a real image-to-image testing workspace.
+- User-facing changes:
+  - Token records now support a custom `token_group`, defaulting to `default`.
+  - Admin Token add/edit modals include a `分组` input.
+  - Admin Token operational table displays each Token's group under the account name.
+  - Token JSON export includes `token_group`.
+  - The `/test` page now has a top navigation bar with links back to `管理主页` and `Token 管理`.
+  - The `/test` page automatically fills the admin API key when the current browser has a valid admin session.
+  - The `/test` page can load Tokens into a grouped selector and send `x-flow2api-token-id` to test a specific Token.
+  - The `/test` page supports choosing files, dragging images, and directly pasting copied images.
+  - The `/test` page defaults to `gemini-3.0-pro-image-square` and includes the user's product-preservation/e-commerce-main-image prompt template.
+- Backend changes:
+  - Added `token_group` to `Token`.
+  - Added `token_group` to SQLite table creation, migration, insert, update, import, plugin import, and admin token response paths.
+  - Added `requested_token_id` support in `LoadBalancer.select_token()` and `get_unavailable_reason()`.
+  - Passed `requested_token_id` from API routes into `GenerationHandler`.
+  - Added `x-flow2api-token-id` parsing for OpenAI-compatible and Gemini-compatible generation endpoints.
+  - Requested Token selection is applied after API-client binding filters, so a user cannot bypass assigned Token bindings.
+- Files changed:
+  - `src/core/models.py`
+  - `src/core/database.py`
+  - `src/services/token_manager.py`
+  - `src/services/load_balancer.py`
+  - `src/services/generation_handler.py`
+  - `src/api/routes.py`
+  - `src/api/admin.py`
+  - `static/manage.html`
+  - `static/test.html`
+  - `tests/test_api_client_pool.py`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Deployment:
+  - Copied changed backend/static files to the VPS.
+  - Updated files under `/opt/flow2api/app`.
+  - Rebuilt and recreated production containers with `docker compose -f docker-compose.prod.yml up -d --build --force-recreate`.
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_pool tests.test_api_client_admin_auth tests.test_plugin_account_import -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\core\models.py src\core\database.py src\services\load_balancer.py src\services\generation_handler.py src\api\routes.py src\api\admin.py`
+  - Inline script syntax check for `static/manage.html` and `static/test.html`.
+  - Online health check against `https://niktokfurniture.com/health`.
+  - Online `/api/tokens` check confirmed `token_group` is returned.
+  - Browser automation confirmed `/test` loads with navigation, default API key, Token selector, default model, default prompt, and paste handler.
+  - Browser automation confirmed admin Token add/edit group inputs and table group display.
+  - Online generation endpoint check with invalid `x-flow2api-token-id` returned a clear 503 without falling back to the default Token pool.
+  - `git diff --check`.
+- Verification result:
+  - Targeted relevant tests passed: 14 tests.
+  - Python compile check passed.
+  - Page script checks passed.
+  - Online deployment checks passed.
+  - `git diff --check` passed with only Git line-ending warnings.
+- Known risk or follow-up:
+  - Full test suite still has the pre-existing unrelated failure in `tests/test_veo_lite_support.py::VeoLiteFlowClientTests::test_check_video_status_uses_media_payload_and_normalizes_response`, failing with `KeyError: 'fifeUrl'`.
+  - `/test` is admin-session gated. Direct unauthenticated access redirects to `/login`, so automated checks must log in first.
+
+## 2026-06-30 - Conversation catch-up record, cloud rollout, account pool, and API client routing
+
+- Purpose: Preserve the full working context from this Codex conversation so future sessions can quickly understand what was changed, deployed, verified, and still needs care.
+- Scope covered:
+  - Pulled and worked from the local repository path `C:\Users\10339\Desktop\codex\flow2api`.
+  - Helped move the project from local-only testing toward a cloud-hosted service on the Ubuntu 24.04 VPS at `15.204.119.78`.
+  - Guided DNS setup for `niktokfurniture.com`, including pointing the apex record at the VPS and routing `www` to the apex domain.
+  - Deployed the service under `/opt/flow2api` with Docker Compose and Caddy HTTPS.
+  - Confirmed the public service at `https://niktokfurniture.com`.
+  - Clarified admin login usage while avoiding storing plaintext secrets in repository docs.
+  - Designed the central API pool direction for about 20 users and about 30 Flow accounts, with per-user API keys, quota tracking, prompt templates, and stable ST/AT refresh as the intended operating model.
+  - Added account import/wizard work so adding Google Flow accounts can become simpler and more automated.
+  - Added the API-client routing model so each external user can have an independent API key, success-count statistics, optional daily and total limits, and optional binding to specific Tokens.
+  - Upgraded the admin Token UI into a more operational view showing live load, per-token success usage, quota/tier, bound clients, latest request status, and AT expiry.
+  - Replaced manual Token-ID prompt binding with a visual binding modal where an admin can select Tokens and choose `all`, `image`, or `video` binding type.
+- Main files changed during the conversation:
+  - `src/core/models.py`
+  - `src/core/database.py`
+  - `src/services/load_balancer.py`
+  - `src/services/generation_handler.py`
+  - `src/api/routes.py`
+  - `src/api/admin.py`
+  - `static/manage.html`
+  - `static/test.html`
+  - `extension/manifest.json`
+  - `extension/options.html`
+  - `extension/options.js`
+  - `extension/import_helpers.js`
+  - `tests/test_api_client_pool.py`
+  - `tests/test_api_client_admin_auth.py`
+  - `tests/test_plugin_account_import.py`
+  - `tests/test_extension_import_helpers.js`
+  - `docs/superpowers/specs/2026-06-30-central-api-pool-design.md`
+  - `docs/superpowers/specs/2026-06-30-account-pool-wizard-design.md`
+  - `docs/superpowers/specs/2026-06-30-token-observability-routing-design.md`
+  - `docs/superpowers/plans/2026-06-30-account-pool-wizard.md`
+  - `docs/superpowers/plans/2026-06-30-token-observability-routing.md`
+- Backend details:
+  - Added `ApiClient` and `ApiClientTokenBinding` models.
+  - Added `api_clients` and `api_client_token_bindings` database tables.
+  - Extended request logs with `api_client_id` and `api_client_name`.
+  - Added API client CRUD and binding helpers in the database layer.
+  - Updated load balancing so bound API clients only use their assigned Tokens for the requested generation type.
+  - Preserved legacy global API-key compatibility.
+  - Added API-client quota checks and success-count increments.
+  - Added admin endpoints under `/api/clients`.
+- Frontend details:
+  - Added the `用户/API Key` admin tab.
+  - Added user API-key creation, listing, activation/deactivation, success usage display, and Token binding controls.
+  - Reworked Token table columns into an operational view: account, status, live load, success usage, quota/tier, binding, latest request, actions.
+  - Added a binding modal that lists available Tokens and supports `图片和视频`, `仅图片`, and `仅视频` binding modes.
+- Deployment notes:
+  - Runtime path on server: `/opt/flow2api`.
+  - Compose file: `/opt/flow2api/docker-compose.prod.yml`.
+  - Main containers: `flow2api` and `flow2api-caddy`.
+  - Deployment pattern used: copy changed files to the server, copy them into `/opt/flow2api/app`, then run `docker compose -f docker-compose.prod.yml up -d --build --force-recreate`.
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_api_client_pool tests.test_api_client_admin_auth tests.test_plugin_account_import -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\core\models.py src\core\database.py src\services\load_balancer.py src\services\generation_handler.py src\api\routes.py src\api\admin.py`
+  - `node -e "const fs=require('fs'); const html=fs.readFileSync('static/manage.html','utf8'); const matches=[...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]; for (const [i,m] of matches.entries()) { new Function(m[1]); } console.log('checked_scripts='+matches.length);"`
+  - `git diff --check`
+  - Online checks against `https://niktokfurniture.com/health`, `/v1/models`, `/api/login`, `/manage`, `/api/clients`, and `/api/tokens`.
+  - Browser automation verified that the `用户/API Key` tab opens, the row-level `绑定` button opens the binding modal, and the modal lists 3 Tokens.
+- Verification result:
+  - Relevant targeted tests passed: 11 tests.
+  - Python compile check passed.
+  - `static/manage.html` inline script syntax check passed.
+  - Online health check returned backend running with 3 total Tokens and 2 active Tokens.
+  - `/v1/models` returned 169 models with the legacy API key.
+  - Admin login, client list, token list, and binding modal all worked online.
+  - `git diff --check` passed with only Git line-ending warnings.
+- Known risk or follow-up:
+  - Full suite currently has one unrelated existing failure: `tests/test_veo_lite_support.py::VeoLiteFlowClientTests::test_check_video_status_uses_media_payload_and_normalizes_response`, failing with `KeyError: 'fifeUrl'`.
+  - Sensitive values such as admin passwords, API keys, ST, AT, and Google cookies must not be written into docs. Keep them in the running config or a secure password manager only.
+
+## 2026-06-30 - Persistent worklog and knowledge base convention
+
+- Purpose: Add durable project memory so future Codex sessions know where to record completed work and reusable project knowledge.
+- Files changed: `docs/WORKLOG.md`, `docs/KNOWLEDGE_BASE.md`, `AGENTS.md`.
+- New convention:
+  - At the end of every work session, update `docs/WORKLOG.md` with what changed, commands run, verification result, deployment result if any, and known risks.
+  - At the end of every work session, update `docs/KNOWLEDGE_BASE.md` with reusable facts, architecture notes, operational runbooks, conventions, and gotchas worth carrying forward.
+  - Do not store plaintext secrets in either file.
+- Verification result: Documentation files were edited locally and reviewed for secret-safe content.
+
 ## 2026-06-29 - Usage documentation and GitHub push
 
 - Purpose: Add a user-facing setup guide for local image generation testing and push the local changes to GitHub.

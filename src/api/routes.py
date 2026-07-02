@@ -1,6 +1,7 @@
 """API routes for OpenAI-compatible and Gemini generateContent endpoints."""
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Dict, List, Optional
 import base64
 import json
@@ -9,10 +10,11 @@ import re
 from urllib.parse import urlparse
 
 from curl_cffi.requests import AsyncSession
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Security, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials
 
-from ..core.auth import AuthManager, verify_api_key_flexible
+from ..core.auth import AuthManager, optional_security
 from ..core.logger import debug_logger
 from ..core.model_resolver import get_base_model_aliases, resolve_model_name
 from ..core.models import (
@@ -92,6 +94,70 @@ def _ensure_generation_handler() -> GenerationHandler:
     if generation_handler is None:
         raise HTTPException(status_code=500, detail="Generation handler not initialized")
     return generation_handler
+
+
+def _get_requested_token_id(request: Request) -> Optional[int]:
+    raw_value = (request.headers.get("x-flow2api-token-id") or "").strip()
+    if not raw_value:
+        return None
+    if not raw_value.isdigit():
+        raise HTTPException(status_code=400, detail="x-flow2api-token-id must be a numeric Token ID")
+    return int(raw_value)
+
+
+async def _resolve_api_client_context(api_key: str) -> Dict[str, Any]:
+    """Resolve a raw API key to legacy or per-user client context."""
+    raw_key = (api_key or "").strip()
+    if AuthManager.verify_api_key(raw_key):
+        return {
+            "id": None,
+            "name": "Legacy API Key",
+            "api_key": raw_key,
+            "is_legacy": True,
+        }
+
+    handler = _ensure_generation_handler()
+    client = await handler.db.get_api_client_by_key(raw_key)
+    if not client or not client.is_active:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    today = date.today().isoformat()
+    if client.total_limit is not None and client.success_count >= client.total_limit:
+        raise HTTPException(status_code=429, detail="API key total quota exceeded")
+    if (
+        client.daily_limit is not None
+        and client.today_date == today
+        and client.today_success_count >= client.daily_limit
+    ):
+        raise HTTPException(status_code=429, detail="API key daily quota exceeded")
+
+    return {
+        "id": client.id,
+        "name": client.name,
+        "api_key": raw_key,
+        "is_legacy": False,
+        "daily_limit": client.daily_limit,
+        "total_limit": client.total_limit,
+    }
+
+
+async def verify_api_client_flexible(
+    credentials: Optional[HTTPAuthorizationCredentials] = Security(optional_security),
+    x_goog_api_key: Optional[str] = Header(None, alias="x-goog-api-key"),
+    key: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Verify API key and return the resolved API client context."""
+    api_key = None
+    if credentials is not None:
+        api_key = credentials.credentials
+    elif x_goog_api_key:
+        api_key = x_goog_api_key
+    elif key:
+        api_key = key
+
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return await _resolve_api_client_context(api_key)
 
 
 def _build_model_description(model_config: Dict[str, Any]) -> str:
@@ -487,6 +553,8 @@ async def _collect_non_stream_result(
     images: List[bytes],
     base_url_override: Optional[str] = None,
     video_media_id: Optional[str] = None,
+    api_client: Optional[Dict[str, Any]] = None,
+    requested_token_id: Optional[int] = None,
 ) -> str:
     handler = _ensure_generation_handler()
     result = None
@@ -497,6 +565,8 @@ async def _collect_non_stream_result(
         stream=False,
         base_url_override=base_url_override,
         video_media_id=video_media_id,
+        api_client=api_client,
+        requested_token_id=requested_token_id,
     ):
         result = chunk
 
@@ -717,6 +787,8 @@ async def _convert_openai_stream_chunk_to_gemini_event(
 async def _iterate_openai_stream(
     normalized: NormalizedGenerationRequest,
     base_url_override: Optional[str] = None,
+    api_client: Optional[Dict[str, Any]] = None,
+    requested_token_id: Optional[int] = None,
 ):
     handler = _ensure_generation_handler()
     async for chunk in handler.handle_generation(
@@ -726,6 +798,8 @@ async def _iterate_openai_stream(
         stream=True,
         base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
+        api_client=api_client,
+        requested_token_id=requested_token_id,
     ):
         if chunk.startswith("data: "):
             yield chunk
@@ -741,6 +815,8 @@ async def _iterate_gemini_stream(
     normalized: NormalizedGenerationRequest,
     response_model: str,
     base_url_override: Optional[str] = None,
+    api_client: Optional[Dict[str, Any]] = None,
+    requested_token_id: Optional[int] = None,
 ):
     handler = _ensure_generation_handler()
     async for chunk in handler.handle_generation(
@@ -750,6 +826,8 @@ async def _iterate_gemini_stream(
         stream=True,
         base_url_override=base_url_override,
         video_media_id=normalized.video_media_id,
+        api_client=api_client,
+        requested_token_id=requested_token_id,
     ):
         if chunk.startswith("data: "):
             payload_text = chunk[6:].strip()
@@ -786,7 +864,7 @@ async def _iterate_gemini_stream(
 
 
 @router.get("/v1/models")
-async def list_models(api_key: str = Depends(verify_api_key_flexible)):
+async def list_models(api_client: Dict[str, Any] = Depends(verify_api_client_flexible)):
     """List available models."""
     models = [
         {
@@ -802,7 +880,7 @@ async def list_models(api_key: str = Depends(verify_api_key_flexible)):
 
 
 @router.get("/v1/models/aliases")
-async def list_model_aliases(api_key: str = Depends(verify_api_key_flexible)):
+async def list_model_aliases(api_client: Dict[str, Any] = Depends(verify_api_client_flexible)):
     """List simplified model aliases for generationConfig-based resolution."""
     aliases = get_base_model_aliases()
     alias_models = []
@@ -821,7 +899,7 @@ async def list_model_aliases(api_key: str = Depends(verify_api_key_flexible)):
 
 @router.get("/v1beta/models")
 @router.get("/models")
-async def list_gemini_models(api_key: str = Depends(verify_api_key_flexible)):
+async def list_gemini_models(api_client: Dict[str, Any] = Depends(verify_api_client_flexible)):
     """List available models using Gemini-compatible response shape."""
     catalog = _get_gemini_model_catalog()
     return {
@@ -834,7 +912,7 @@ async def list_gemini_models(api_key: str = Depends(verify_api_key_flexible)):
 
 @router.get("/v1beta/models/{model}")
 @router.get("/models/{model}")
-async def get_gemini_model(model: str, api_key: str = Depends(verify_api_key_flexible)):
+async def get_gemini_model(model: str, api_client: Dict[str, Any] = Depends(verify_api_client_flexible)):
     """Return a single model using Gemini-compatible response shape."""
     catalog = _get_gemini_model_catalog()
     description = catalog.get(model)
@@ -851,7 +929,7 @@ async def get_gemini_model(model: str, api_key: str = Depends(verify_api_key_fle
 async def create_chat_completion(
     request: ChatCompletionRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_api_key_flexible),
+    api_client: Dict[str, Any] = Depends(verify_api_client_flexible),
 ):
     """OpenAI-compatible unified generation endpoint."""
     try:
@@ -860,10 +938,11 @@ async def create_chat_completion(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        requested_token_id = _get_requested_token_id(raw_request)
 
         if request.stream:
             return StreamingResponse(
-                _iterate_openai_stream(normalized, request_base_url),
+                _iterate_openai_stream(normalized, request_base_url, api_client=api_client, requested_token_id=requested_token_id),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -879,6 +958,8 @@ async def create_chat_completion(
                 normalized.images,
                 base_url_override=request_base_url,
                 video_media_id=normalized.video_media_id,
+                api_client=api_client,
+                requested_token_id=requested_token_id,
             )
         )
         return _build_openai_json_response(payload)
@@ -895,7 +976,7 @@ async def generate_content(
     model: str,
     request: GeminiGenerateContentRequest,
     raw_request: Request,
-    api_key: str = Depends(verify_api_key_flexible),
+    api_client: Dict[str, Any] = Depends(verify_api_client_flexible),
 ):
     """Gemini official generateContent endpoint."""
     try:
@@ -904,6 +985,7 @@ async def generate_content(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        requested_token_id = _get_requested_token_id(raw_request)
 
         payload = _enrich_payload_with_direct_url(
             _parse_handler_result(
@@ -913,6 +995,8 @@ async def generate_content(
                     normalized.images,
                     base_url_override=request_base_url,
                     video_media_id=normalized.video_media_id,
+                    api_client=api_client,
+                    requested_token_id=requested_token_id,
                 )
             )
         )
@@ -942,7 +1026,7 @@ async def stream_generate_content(
     request: GeminiGenerateContentRequest,
     raw_request: Request,
     alt: Optional[str] = Query(None),
-    api_key: str = Depends(verify_api_key_flexible),
+    api_client: Dict[str, Any] = Depends(verify_api_client_flexible),
 ):
     """Gemini official streamGenerateContent endpoint."""
     try:
@@ -951,9 +1035,10 @@ async def stream_generate_content(
             raise HTTPException(status_code=400, detail="Prompt cannot be empty")
 
         request_base_url = _get_request_base_url(raw_request)
+        requested_token_id = _get_requested_token_id(raw_request)
 
         return StreamingResponse(
-            _iterate_gemini_stream(normalized, normalized.model, request_base_url),
+            _iterate_gemini_stream(normalized, normalized.model, request_base_url, api_client=api_client, requested_token_id=requested_token_id),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -985,7 +1070,9 @@ async def captcha_websocket_endpoint(websocket: WebSocket):
     if authorization.lower().startswith("bearer "):
         api_key = authorization[7:].strip()
 
-    if not api_key or not AuthManager.verify_api_key(api_key):
+    try:
+        await _resolve_api_client_context(api_key)
+    except HTTPException:
         await websocket.close(code=1008)
         return
 

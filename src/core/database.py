@@ -7,7 +7,23 @@ from datetime import date, datetime
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from .config import DEFAULT_YESCAPTCHA_TASK_TYPE, normalize_yescaptcha_task_type
-from .models import Token, TokenStats, Task, RequestLog, AdminConfig, ProxyConfig, GenerationConfig, CacheConfig, Project, CaptchaConfig, PluginConfig, CallLogicConfig, TokenRefreshConfig
+from .models import (
+    ApiClient,
+    ApiClientTokenBinding,
+    Token,
+    TokenStats,
+    Task,
+    RequestLog,
+    AdminConfig,
+    ProxyConfig,
+    GenerationConfig,
+    CacheConfig,
+    Project,
+    CaptchaConfig,
+    PluginConfig,
+    CallLogicConfig,
+    TokenRefreshConfig,
+)
 
 
 class Database:
@@ -432,6 +448,44 @@ class Database:
                     )
                 """)
 
+            if not await self._table_exists(db, "api_clients"):
+                print("  Creating missing table: api_clients")
+                await db.execute("""
+                    CREATE TABLE api_clients (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        username TEXT UNIQUE,
+                        password_hash TEXT DEFAULT '',
+                        role TEXT DEFAULT 'user',
+                        api_key TEXT UNIQUE NOT NULL,
+                        plugin_connection_token TEXT UNIQUE,
+                        is_active BOOLEAN DEFAULT 1,
+                        daily_limit INTEGER,
+                        total_limit INTEGER,
+                        success_count INTEGER DEFAULT 0,
+                        today_success_count INTEGER DEFAULT 0,
+                        today_date DATE,
+                        last_used_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+            if not await self._table_exists(db, "api_client_token_bindings"):
+                print("  Creating missing table: api_client_token_bindings")
+                await db.execute("""
+                    CREATE TABLE api_client_token_bindings (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        client_id INTEGER NOT NULL,
+                        token_id INTEGER NOT NULL,
+                        generation_type TEXT DEFAULT 'all',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(client_id, token_id, generation_type),
+                        FOREIGN KEY (client_id) REFERENCES api_clients(id),
+                        FOREIGN KEY (token_id) REFERENCES tokens(id)
+                    )
+                """)
+
             # ========== Step 2: Add missing columns to existing tables ==========
             # Check and add missing columns to tokens table
             if await self._table_exists(db, "tokens"):
@@ -442,6 +496,8 @@ class Database:
                     ("user_paygate_tier", "TEXT"),  # User tier
                     ("current_project_id", "TEXT"),  # Current project UUID
                     ("current_project_name", "TEXT"),  # Project name
+                    ("token_group", "TEXT DEFAULT 'default'"),  # 自定义分组
+                    ("owner_client_id", "INTEGER"),
                     ("image_enabled", "BOOLEAN DEFAULT 1"),
                     ("video_enabled", "BOOLEAN DEFAULT 1"),
                     ("image_concurrency", "INTEGER DEFAULT -1"),
@@ -459,6 +515,7 @@ class Database:
                     ("last_st_refresh_result", "TEXT DEFAULT ''"),
                     ("ban_reason", "TEXT"),  # 禁用原因
                     ("banned_at", "TIMESTAMP"),  # 禁用时间
+                    ("cooldown_until", "TIMESTAMP"),
                 ]
 
                 for col_name, col_type in columns_to_add:
@@ -468,6 +525,21 @@ class Database:
                             print(f"  ✓ Added column '{col_name}' to tokens table")
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
+
+            if await self._table_exists(db, "api_clients"):
+                client_columns_to_add = [
+                    ("username", "TEXT"),
+                    ("password_hash", "TEXT DEFAULT ''"),
+                    ("role", "TEXT DEFAULT 'user'"),
+                    ("plugin_connection_token", "TEXT"),
+                ]
+                for col_name, col_type in client_columns_to_add:
+                    if not await self._column_exists(db, "api_clients", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE api_clients ADD COLUMN {col_name} {col_type}")
+                            print(f"  Added column '{col_name}' to api_clients table")
+                        except Exception as e:
+                            print(f"  Failed to add column '{col_name}' to api_clients table: {e}")
 
             # Check and add missing columns to admin_config table
             if await self._table_exists(db, "admin_config"):
@@ -506,6 +578,20 @@ class Database:
                             print(f"  ✓ Added column '{col_name}' to generation_config table")
                         except Exception as e:
                             print(f"  ✗ Failed to add column '{col_name}': {e}")
+
+            if await self._table_exists(db, "request_logs"):
+                request_log_columns_to_add = [
+                    ("api_client_id", "INTEGER"),
+                    ("api_client_name", "TEXT"),
+                ]
+
+                for col_name, col_type in request_log_columns_to_add:
+                    if not await self._column_exists(db, "request_logs", col_name):
+                        try:
+                            await db.execute(f"ALTER TABLE request_logs ADD COLUMN {col_name} {col_type}")
+                            print(f"  Added column '{col_name}' to request_logs table")
+                        except Exception as e:
+                            print(f"  Failed to add column '{col_name}': {e}")
 
             # Check and add missing columns to captcha_config table
             if await self._table_exists(db, "captcha_config"):
@@ -628,6 +714,8 @@ class Database:
                     user_paygate_tier TEXT,
                     current_project_id TEXT,
                     current_project_name TEXT,
+                    token_group TEXT DEFAULT 'default',
+                    owner_client_id INTEGER,
                     image_enabled BOOLEAN DEFAULT 1,
                     video_enabled BOOLEAN DEFAULT 1,
                     image_concurrency INTEGER DEFAULT -1,
@@ -644,7 +732,8 @@ class Database:
                     last_st_refresh_at TIMESTAMP,
                     last_st_refresh_result TEXT DEFAULT '',
                     ban_reason TEXT,
-                    banned_at TIMESTAMP
+                    banned_at TIMESTAMP,
+                    cooldown_until TIMESTAMP
                 )
             """)
 
@@ -706,6 +795,8 @@ class Database:
                 CREATE TABLE IF NOT EXISTS request_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     token_id INTEGER,
+                    api_client_id INTEGER,
+                    api_client_name TEXT,
                     operation TEXT NOT NULL,
                     request_body TEXT,
                     response_body TEXT,
@@ -841,12 +932,52 @@ class Database:
                 )
             """)
 
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_clients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    username TEXT UNIQUE,
+                    password_hash TEXT DEFAULT '',
+                    role TEXT DEFAULT 'user',
+                    api_key TEXT UNIQUE NOT NULL,
+                    plugin_connection_token TEXT UNIQUE,
+                    is_active BOOLEAN DEFAULT 1,
+                    daily_limit INTEGER,
+                    total_limit INTEGER,
+                    success_count INTEGER DEFAULT 0,
+                    today_success_count INTEGER DEFAULT 0,
+                    today_date DATE,
+                    last_used_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS api_client_token_bindings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    client_id INTEGER NOT NULL,
+                    token_id INTEGER NOT NULL,
+                    generation_type TEXT DEFAULT 'all',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(client_id, token_id, generation_type),
+                    FOREIGN KEY (client_id) REFERENCES api_clients(id),
+                    FOREIGN KEY (token_id) REFERENCES tokens(id)
+                )
+            """)
+
             # Create indexes
             await db.execute("CREATE INDEX IF NOT EXISTS idx_task_id ON tasks(task_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_token_st ON tokens(st)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_project_id ON projects(project_id)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_email ON tokens(email)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_is_active_last_used_at ON tokens(is_active, last_used_at)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_tokens_owner_client_id ON tokens(owner_client_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_clients_api_key ON api_clients(api_key)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_clients_username ON api_clients(username)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_clients_plugin_token ON api_clients(plugin_connection_token)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_client_token_bindings_client ON api_client_token_bindings(client_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_api_client_token_bindings_token ON api_client_token_bindings(token_id)")
 
             # Migrate request_logs table if needed
             await self._migrate_request_logs(db)
@@ -873,6 +1004,8 @@ class Database:
                     CREATE TABLE request_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         token_id INTEGER,
+                        api_client_id INTEGER,
+                        api_client_name TEXT,
                         operation TEXT NOT NULL,
                         request_body TEXT,
                         response_body TEXT,
@@ -921,6 +1054,10 @@ class Database:
             if not await self._column_exists(db, "request_logs", "updated_at"):
                 await db.execute("ALTER TABLE request_logs ADD COLUMN updated_at TIMESTAMP")
             await db.execute("UPDATE request_logs SET updated_at = created_at WHERE updated_at IS NULL")
+            if not await self._column_exists(db, "request_logs", "api_client_id"):
+                await db.execute("ALTER TABLE request_logs ADD COLUMN api_client_id INTEGER")
+            if not await self._column_exists(db, "request_logs", "api_client_name"):
+                await db.execute("ALTER TABLE request_logs ADD COLUMN api_client_name TEXT")
         except Exception as e:
             print(f"?? request_logs?????: {e}")
             # Continue even if migration fails
@@ -930,16 +1067,16 @@ class Database:
         """Add a new token"""
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
-                INSERT INTO tokens (st, at, at_expires, email, name, remark, is_active,
+                INSERT INTO tokens (st, at, at_expires, email, name, remark, token_group, owner_client_id, is_active,
                                    credits, user_paygate_tier, current_project_id, current_project_name,
                                    image_enabled, video_enabled, image_concurrency, video_concurrency,
                                    captcha_proxy_url, extension_route_key,
                                    protocol_mode, google_cookies, login_account, login_password,
                                    proxy_url, auto_refresh_enabled, refresh_interval_minutes,
                                    last_st_refresh_at, last_st_refresh_result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (token.st, token.at, token.at_expires, token.email, token.name, token.remark,
-                  token.is_active, token.credits, token.user_paygate_tier,
+                  token.token_group or "default", token.owner_client_id, token.is_active, token.credits, token.user_paygate_tier,
                   token.current_project_id, token.current_project_name,
                   token.image_enabled, token.video_enabled,
                   token.image_concurrency, token.video_concurrency,
@@ -997,67 +1134,165 @@ class Database:
             rows = await cursor.fetchall()
             return [Token(**dict(row)) for row in rows]
 
-    async def get_all_tokens_with_stats(self) -> List[Dict[str, Any]]:
+    async def get_all_tokens_with_stats(self, owner_client_id: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get all tokens with merged statistics in one query"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             today = self._current_stats_date()
+            owner_clause = ""
+            params: List[Any] = [today, today, today]
+            if owner_client_id is not None:
+                owner_clause = "WHERE t.owner_client_id = ?"
+                params.append(int(owner_client_id))
             cursor = await db.execute("""
+                WITH request_error_stats AS (
+                    SELECT
+                        token_id,
+                        COUNT(*) AS error_count,
+                        COALESCE(SUM(CASE WHEN date(created_at) = ? THEN 1 ELSE 0 END), 0) AS today_error_count,
+                        MAX(created_at) AS last_error_at
+                    FROM request_logs
+                    WHERE token_id IS NOT NULL
+                      AND status_code >= 400
+                    GROUP BY token_id
+                )
                 SELECT
                     t.*,
                     COALESCE(ts.image_count, 0) AS image_count,
                     COALESCE(ts.video_count, 0) AS video_count,
-                    COALESCE(ts.error_count, 0) AS error_count,
+                    COALESCE(res.error_count, 0) AS error_count,
                     COALESCE(CASE WHEN ts.today_date = ? THEN ts.today_image_count ELSE 0 END, 0) AS today_image_count,
                     COALESCE(CASE WHEN ts.today_date = ? THEN ts.today_video_count ELSE 0 END, 0) AS today_video_count,
-                    COALESCE(CASE WHEN ts.today_date = ? THEN ts.today_error_count ELSE 0 END, 0) AS today_error_count,
+                    COALESCE(res.today_error_count, 0) AS today_error_count,
                     COALESCE(ts.consecutive_error_count, 0) AS consecutive_error_count,
-                    ts.last_error_at AS last_error_at
+                    res.last_error_at AS last_error_at,
+                    (
+                        SELECT GROUP_CONCAT(DISTINCT ac.name)
+                        FROM api_client_token_bindings actb
+                        JOIN api_clients ac ON ac.id = actb.client_id
+                        WHERE actb.token_id = t.id
+                    ) AS bound_clients_raw,
+                    (
+                        SELECT rl.status_text
+                        FROM request_logs rl
+                        WHERE rl.token_id = t.id
+                        ORDER BY rl.created_at DESC, rl.id DESC
+                        LIMIT 1
+                    ) AS last_status_text,
+                    (
+                        SELECT rl.status_code
+                        FROM request_logs rl
+                        WHERE rl.token_id = t.id
+                        ORDER BY rl.created_at DESC, rl.id DESC
+                        LIMIT 1
+                    ) AS last_status_code,
+                    (
+                        SELECT rl.duration
+                        FROM request_logs rl
+                        WHERE rl.token_id = t.id
+                        ORDER BY rl.created_at DESC, rl.id DESC
+                        LIMIT 1
+                    ) AS last_duration,
+                    (
+                        SELECT rl.created_at
+                        FROM request_logs rl
+                        WHERE rl.token_id = t.id
+                        ORDER BY rl.created_at DESC, rl.id DESC
+                        LIMIT 1
+                    ) AS last_request_at,
+                    (
+                        SELECT rl.api_client_name
+                        FROM request_logs rl
+                        WHERE rl.token_id = t.id
+                        ORDER BY rl.created_at DESC, rl.id DESC
+                        LIMIT 1
+                    ) AS last_api_client_name
                 FROM tokens t
                 LEFT JOIN token_stats ts ON ts.token_id = t.id
+                LEFT JOIN request_error_stats res ON res.token_id = t.id
+                {owner_clause}
                 ORDER BY t.created_at DESC
-            """, (today, today, today))
+            """.format(owner_clause=owner_clause), params)
             rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+            result = []
+            for row in rows:
+                item = dict(row)
+                raw_clients = item.pop("bound_clients_raw", "") or ""
+                item["bound_clients"] = [
+                    name for name in raw_clients.split(",") if name
+                ]
+                result.append(item)
+            return result
 
-    async def get_dashboard_stats(self) -> Dict[str, int]:
+    async def get_dashboard_stats(self, owner_client_id: Optional[int] = None) -> Dict[str, int]:
         """Get dashboard counters with aggregated SQL queries"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
             today = self._current_stats_date()
+            token_where = ""
+            token_params: List[Any] = []
+            if owner_client_id is not None:
+                token_where = "WHERE owner_client_id = ?"
+                token_params.append(int(owner_client_id))
 
-            token_cursor = await db.execute("""
+            token_cursor = await db.execute(f"""
                 SELECT
                     COUNT(*) AS total_tokens,
                     COALESCE(SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END), 0) AS active_tokens
                 FROM tokens
-            """)
+                {token_where}
+            """, token_params)
             token_row = await token_cursor.fetchone()
 
-            stats_cursor = await db.execute("""
+            stats_owner_join = ""
+            stats_owner_where = ""
+            stats_params: List[Any] = [today, today]
+            if owner_client_id is not None:
+                stats_owner_join = "JOIN tokens t ON t.id = token_stats.token_id"
+                stats_owner_where = "WHERE t.owner_client_id = ?"
+                stats_params.append(int(owner_client_id))
+            stats_cursor = await db.execute(f"""
                 SELECT
                     COALESCE(SUM(image_count), 0) AS total_images,
                     COALESCE(SUM(video_count), 0) AS total_videos,
-                    COALESCE(SUM(error_count), 0) AS total_errors,
                     COALESCE(SUM(CASE WHEN today_date = ? THEN today_image_count ELSE 0 END), 0) AS today_images,
-                    COALESCE(SUM(CASE WHEN today_date = ? THEN today_video_count ELSE 0 END), 0) AS today_videos,
-                    COALESCE(SUM(CASE WHEN today_date = ? THEN today_error_count ELSE 0 END), 0) AS today_errors
+                    COALESCE(SUM(CASE WHEN today_date = ? THEN today_video_count ELSE 0 END), 0) AS today_videos
                 FROM token_stats
-            """, (today, today, today))
+                {stats_owner_join}
+                {stats_owner_where}
+            """, stats_params)
             stats_row = await stats_cursor.fetchone()
+
+            error_owner_join = ""
+            error_owner_where = "WHERE status_code >= 400"
+            error_params: List[Any] = [today]
+            if owner_client_id is not None:
+                error_owner_join = "LEFT JOIN tokens t ON t.id = request_logs.token_id"
+                error_owner_where = "WHERE request_logs.status_code >= 400 AND t.owner_client_id = ?"
+                error_params.append(int(owner_client_id))
+            error_cursor = await db.execute(f"""
+                SELECT
+                    COUNT(*) AS total_errors,
+                    COALESCE(SUM(CASE WHEN date(request_logs.created_at) = ? THEN 1 ELSE 0 END), 0) AS today_errors
+                FROM request_logs
+                {error_owner_join}
+                {error_owner_where}
+            """, error_params)
+            error_row = await error_cursor.fetchone()
 
             token_data = dict(token_row) if token_row else {}
             stats_data = dict(stats_row) if stats_row else {}
+            error_data = dict(error_row) if error_row else {}
 
             return {
                 "total_tokens": int(token_data.get("total_tokens") or 0),
                 "active_tokens": int(token_data.get("active_tokens") or 0),
                 "total_images": int(stats_data.get("total_images") or 0),
                 "total_videos": int(stats_data.get("total_videos") or 0),
-                "total_errors": int(stats_data.get("total_errors") or 0),
+                "total_errors": int(error_data.get("total_errors") or 0),
                 "today_images": int(stats_data.get("today_images") or 0),
                 "today_videos": int(stats_data.get("today_videos") or 0),
-                "today_errors": int(stats_data.get("today_errors") or 0)
+                "today_errors": int(error_data.get("today_errors") or 0)
             }
 
     async def get_system_info_stats(self) -> Dict[str, int]:
@@ -1333,6 +1568,242 @@ class Database:
             """, (token_id,))
             await db.commit()
 
+    # API client operations
+    def _normalize_generation_type(self, generation_type: Optional[str]) -> str:
+        normalized = (generation_type or "all").strip().lower()
+        if normalized not in {"all", "image", "video"}:
+            return "all"
+        return normalized
+
+    async def add_api_client(self, client: ApiClient) -> int:
+        """Add a per-user API client."""
+        async with self._connect(write=True) as db:
+            cursor = await db.execute("""
+                INSERT INTO api_clients (
+                    name, username, password_hash, role, api_key, plugin_connection_token,
+                    is_active, daily_limit, total_limit,
+                    success_count, today_success_count, today_date, last_used_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                client.name,
+                (client.username or "").strip() or None,
+                client.password_hash or "",
+                client.role or "user",
+                client.api_key,
+                (client.plugin_connection_token or "").strip() or None,
+                bool(client.is_active),
+                client.daily_limit,
+                client.total_limit,
+                int(client.success_count or 0),
+                int(client.today_success_count or 0),
+                client.today_date,
+                client.last_used_at,
+            ))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_api_client(self, client_id: int) -> Optional[ApiClient]:
+        """Get API client by id."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM api_clients WHERE id = ?", (client_id,))
+            row = await cursor.fetchone()
+            return ApiClient(**dict(row)) if row else None
+
+    async def get_api_client_by_key(self, api_key: str) -> Optional[ApiClient]:
+        """Get active or inactive API client by raw API key."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM api_clients WHERE api_key = ?", (api_key,))
+            row = await cursor.fetchone()
+            return ApiClient(**dict(row)) if row else None
+
+    async def get_api_client_by_username(self, username: str) -> Optional[ApiClient]:
+        """Get API client user by login username."""
+        normalized = (username or "").strip()
+        if not normalized:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM api_clients WHERE username = ?",
+                (normalized,),
+            )
+            row = await cursor.fetchone()
+            return ApiClient(**dict(row)) if row else None
+
+    async def get_api_client_by_plugin_token(self, plugin_connection_token: str) -> Optional[ApiClient]:
+        """Get API client user by per-user plugin connection token."""
+        normalized = (plugin_connection_token or "").strip()
+        if not normalized:
+            return None
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT * FROM api_clients WHERE plugin_connection_token = ?",
+                (normalized,),
+            )
+            row = await cursor.fetchone()
+            return ApiClient(**dict(row)) if row else None
+
+    async def list_api_clients(self) -> List[Dict[str, Any]]:
+        """List API clients with binding counts."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT
+                    ac.*,
+                    COUNT(actb.id) AS binding_count
+                FROM api_clients ac
+                LEFT JOIN api_client_token_bindings actb ON actb.client_id = ac.id
+                GROUP BY ac.id
+                ORDER BY ac.created_at DESC, ac.id DESC
+            """)
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def update_api_client(self, client_id: int, **kwargs):
+        """Update API client fields."""
+        allowed = {
+            "name",
+            "username",
+            "password_hash",
+            "role",
+            "api_key",
+            "plugin_connection_token",
+            "is_active",
+            "daily_limit",
+            "total_limit",
+        }
+        update_fields = {key: value for key, value in kwargs.items() if key in allowed}
+        if not update_fields:
+            return
+
+        clauses = []
+        values = []
+        for key, value in update_fields.items():
+            clauses.append(f"{key} = ?")
+            values.append(value)
+        clauses.append("updated_at = CURRENT_TIMESTAMP")
+        values.append(client_id)
+
+        async with self._connect(write=True) as db:
+            await db.execute(
+                f"UPDATE api_clients SET {', '.join(clauses)} WHERE id = ?",
+                values,
+            )
+            await db.commit()
+
+    async def delete_api_client(self, client_id: int) -> bool:
+        """Delete an API client and its token bindings."""
+        async with self._connect(write=True) as db:
+            await db.execute(
+                "DELETE FROM api_client_token_bindings WHERE client_id = ?",
+                (client_id,),
+            )
+            cursor = await db.execute(
+                "DELETE FROM api_clients WHERE id = ?",
+                (client_id,),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def set_api_client_token_bindings(self, client_id: int, bindings: List[Dict[str, Any]]):
+        """Replace all token bindings for one API client."""
+        async with self._connect(write=True) as db:
+            await db.execute(
+                "DELETE FROM api_client_token_bindings WHERE client_id = ?",
+                (client_id,),
+            )
+            for binding in bindings or []:
+                token_id = int(binding.get("token_id") or 0)
+                if token_id <= 0:
+                    continue
+                generation_type = self._normalize_generation_type(binding.get("generation_type"))
+                await db.execute("""
+                    INSERT OR IGNORE INTO api_client_token_bindings (
+                        client_id, token_id, generation_type
+                    )
+                    VALUES (?, ?, ?)
+                """, (client_id, token_id, generation_type))
+            await db.commit()
+
+    async def add_api_client_token_binding(
+        self,
+        client_id: int,
+        token_id: int,
+        generation_type: str = "all",
+    ):
+        """Add one token binding for an API client without replacing existing bindings."""
+        normalized = self._normalize_generation_type(generation_type)
+        async with self._connect(write=True) as db:
+            await db.execute("""
+                INSERT OR IGNORE INTO api_client_token_bindings (
+                    client_id, token_id, generation_type
+                )
+                VALUES (?, ?, ?)
+            """, (int(client_id), int(token_id), normalized))
+            await db.commit()
+
+    async def get_api_client_token_bindings(self, client_id: int) -> List[ApiClientTokenBinding]:
+        """Get all token bindings for a client."""
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("""
+                SELECT * FROM api_client_token_bindings
+                WHERE client_id = ?
+                ORDER BY token_id ASC, generation_type ASC
+            """, (client_id,))
+            rows = await cursor.fetchall()
+            return [ApiClientTokenBinding(**dict(row)) for row in rows]
+
+    async def get_bound_token_ids_for_client(self, client_id: int, generation_type: str = "all") -> set[int]:
+        """Return token ids explicitly bound to a client."""
+        normalized = self._normalize_generation_type(generation_type)
+        async with self._connect() as db:
+            cursor = await db.execute("""
+                SELECT token_id
+                FROM api_client_token_bindings
+                WHERE client_id = ?
+                  AND generation_type IN ('all', ?)
+            """, (client_id, normalized))
+            rows = await cursor.fetchall()
+            return {int(row[0]) for row in rows}
+
+    async def increment_api_client_success(self, client_id: int):
+        """Record a successful generation for an API client."""
+        today = self._current_stats_date()
+        async with self._connect(write=True) as db:
+            cursor = await db.execute(
+                "SELECT today_date FROM api_clients WHERE id = ?",
+                (client_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                return
+            if row[0] != today:
+                await db.execute("""
+                    UPDATE api_clients
+                    SET success_count = success_count + 1,
+                        today_success_count = 1,
+                        today_date = ?,
+                        last_used_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (today, client_id))
+            else:
+                await db.execute("""
+                    UPDATE api_clients
+                    SET success_count = success_count + 1,
+                        today_success_count = today_success_count + 1,
+                        today_date = ?,
+                        last_used_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (today, client_id))
+            await db.commit()
+
     # Config operations
     async def get_admin_config(self) -> Optional[AdminConfig]:
         """Get admin configuration"""
@@ -1499,10 +1970,16 @@ class Database:
         """Add request log and return log id"""
         async with self._connect(write=True) as db:
             cursor = await db.execute("""
-                INSERT INTO request_logs (token_id, operation, request_body, response_body, status_code, duration, status_text, progress)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO request_logs (
+                    token_id, api_client_id, api_client_name, operation,
+                    request_body, response_body, status_code, duration,
+                    status_text, progress
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 log.token_id,
+                getattr(log, "api_client_id", None),
+                getattr(log, "api_client_name", None),
                 log.operation,
                 log.request_body,
                 log.response_body,
@@ -1521,6 +1998,8 @@ class Database:
 
         allowed_fields = {
             "token_id",
+            "api_client_id",
+            "api_client_name",
             "operation",
             "request_body",
             "response_body",
@@ -1548,7 +2027,13 @@ class Database:
             )
             await db.commit()
 
-    async def get_logs(self, limit: int = 100, token_id: Optional[int] = None, include_payload: bool = False):
+    async def get_logs(
+        self,
+        limit: int = 100,
+        token_id: Optional[int] = None,
+        include_payload: bool = False,
+        owner_client_id: Optional[int] = None,
+    ):
         """Get request logs with token info, optionally including payload fields"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -1561,54 +2046,48 @@ class Database:
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
 
+            where_clauses = []
+            params: List[Any] = []
             if token_id:
-                cursor = await db.execute(f"""
-                    SELECT
-                        rl.id,
-                        rl.token_id,
-                        rl.operation,
-                        {payload_columns}
-                        {response_excerpt_column}
-                        rl.status_code,
-                        rl.duration,
-                        {status_text_column}
-                        {progress_column}
-                        rl.created_at,
-                        {updated_at_column}
-                        t.email as token_email,
-                        t.name as token_username
-                    FROM request_logs rl
-                    LEFT JOIN tokens t ON rl.token_id = t.id
-                    WHERE rl.token_id = ?
-                    ORDER BY rl.created_at DESC
-                    LIMIT ?
-                """, (token_id, limit))
-            else:
-                cursor = await db.execute(f"""
-                    SELECT
-                        rl.id,
-                        rl.token_id,
-                        rl.operation,
-                        {payload_columns}
-                        {response_excerpt_column}
-                        rl.status_code,
-                        rl.duration,
-                        {status_text_column}
-                        {progress_column}
-                        rl.created_at,
-                        {updated_at_column}
-                        t.email as token_email,
-                        t.name as token_username
-                    FROM request_logs rl
-                    LEFT JOIN tokens t ON rl.token_id = t.id
-                    ORDER BY rl.created_at DESC
-                    LIMIT ?
-                """, (limit,))
+                where_clauses.append("rl.token_id = ?")
+                params.append(token_id)
+            if owner_client_id is not None:
+                where_clauses.append("t.owner_client_id = ?")
+                params.append(int(owner_client_id))
+            where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+            params.append(limit)
+            cursor = await db.execute(f"""
+                SELECT
+                    rl.id,
+                    rl.token_id,
+                    rl.api_client_id,
+                    rl.api_client_name,
+                    rl.operation,
+                    {payload_columns}
+                    {response_excerpt_column}
+                    rl.status_code,
+                    rl.duration,
+                    {status_text_column}
+                    {progress_column}
+                    rl.created_at,
+                    {updated_at_column}
+                    t.email as token_email,
+                    t.name as token_username
+                FROM request_logs rl
+                LEFT JOIN tokens t ON rl.token_id = t.id
+                {where_sql}
+                ORDER BY rl.created_at DESC
+                LIMIT ?
+            """, params)
 
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
-    async def get_log_detail(self, log_id: int) -> Optional[Dict[str, Any]]:
+    async def get_log_detail(
+        self,
+        log_id: int,
+        owner_client_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
         """Get single request log detail including payload fields"""
         async with self._connect() as db:
             db.row_factory = aiosqlite.Row
@@ -1618,10 +2097,17 @@ class Database:
             status_text_column = "rl.status_text," if has_status_text else "'' as status_text,"
             progress_column = "rl.progress," if has_progress else "0 as progress,"
             updated_at_column = "rl.updated_at," if has_updated_at else "rl.created_at as updated_at,"
+            owner_clause = ""
+            params: List[Any] = [log_id]
+            if owner_client_id is not None:
+                owner_clause = "AND t.owner_client_id = ?"
+                params.append(int(owner_client_id))
             cursor = await db.execute(f"""
                 SELECT
                     rl.id,
                     rl.token_id,
+                    rl.api_client_id,
+                    rl.api_client_name,
                     rl.operation,
                     rl.request_body,
                     rl.response_body,
@@ -1636,8 +2122,9 @@ class Database:
                 FROM request_logs rl
                 LEFT JOIN tokens t ON rl.token_id = t.id
                 WHERE rl.id = ?
+                {owner_clause}
                 LIMIT 1
-            """, (log_id,))
+            """, params)
             row = await cursor.fetchone()
             return dict(row) if row else None
 

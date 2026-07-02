@@ -1,5 +1,6 @@
 """Token manager for Flow2API with AT auto-refresh"""
 import asyncio
+import random
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, List
@@ -103,6 +104,17 @@ class TokenManager:
 
     def _clear_at_validation_cache(self, token_id: int) -> None:
         self._at_validation_cache.pop(int(token_id), None)
+
+    def _short_refresh_result(self, message: str) -> str:
+        clean = " ".join(str(message or "").split())
+        return clean[:1000]
+
+    async def _record_refresh_result(self, token_id: int, message: str) -> None:
+        await self.db.update_token(
+            token_id,
+            last_st_refresh_at=datetime.now(timezone.utc),
+            last_st_refresh_result=self._short_refresh_result(message),
+        )
 
     def _mark_at_valid(self, token_id: int, ttl_seconds: int = 300) -> None:
         self._at_validation_cache[int(token_id)] = time.monotonic() + max(30, int(ttl_seconds or 300))
@@ -258,13 +270,39 @@ class TokenManager:
     async def enable_token(self, token_id: int):
         """Enable a token and reset error count"""
         # Enable the token
-        await self.db.update_token(token_id, is_active=True, ban_reason=None, banned_at=None)
+        await self.db.update_token(token_id, is_active=True, ban_reason=None, banned_at=None, cooldown_until=None)
         # Reset error count when enabling (only reset total error_count, keep today_error_count)
         await self.db.reset_error_count(token_id)
 
-    async def disable_token(self, token_id: int):
+    async def disable_token(self, token_id: int, reason: Optional[str] = None):
         """Disable a token"""
-        await self.db.update_token(token_id, is_active=False)
+        updates: Dict[str, Any] = {"is_active": False}
+        if reason:
+            updates["ban_reason"] = reason
+            updates["banned_at"] = datetime.now(timezone.utc)
+        await self.db.update_token(token_id, **updates)
+
+    async def cooldown_token_after_failure(
+        self,
+        token_id: int,
+        min_seconds: int = 60,
+        max_seconds: int = 180,
+    ):
+        """Temporarily keep a failed token out of load balancing."""
+        safe_min = max(60, int(min_seconds or 60))
+        safe_max = min(180, max(safe_min, int(max_seconds or 180)))
+        cooldown_seconds = random.randint(safe_min, safe_max)
+        cooldown_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown_seconds)
+
+        token = await self.db.get_token(token_id)
+        existing_until = self._as_utc(getattr(token, "cooldown_until", None)) if token else None
+        if existing_until and existing_until > cooldown_until:
+            cooldown_until = existing_until
+
+        debug_logger.log_warning(
+            f"[TOKEN_COOLDOWN] Token {token_id} cooling down until {cooldown_until.isoformat()}"
+        )
+        await self.db.update_token(token_id, cooldown_until=cooldown_until)
 
     # ========== Token添加 (支持Project创建) ==========
 
@@ -274,6 +312,7 @@ class TokenManager:
         project_id: Optional[str] = None,
         project_name: Optional[str] = None,
         remark: Optional[str] = None,
+        token_group: Optional[str] = None,
         image_enabled: bool = True,
         video_enabled: bool = True,
         image_concurrency: int = -1,
@@ -287,6 +326,7 @@ class TokenManager:
         proxy_url: Optional[str] = None,
         auto_refresh_enabled: bool = True,
         refresh_interval_minutes: int = 120,
+        owner_client_id: Optional[int] = None,
     ) -> Token:
         """Add a new token and prepare its pooled projects."""
         existing_token = await self.db.get_token_by_st(st)
@@ -352,6 +392,8 @@ class TokenManager:
             email=email,
             name=name,
             remark=remark,
+            token_group=(token_group or "default").strip() or "default",
+            owner_client_id=owner_client_id,
             is_active=True,
             credits=credits,
             user_paygate_tier=user_paygate_tier,
@@ -395,6 +437,7 @@ class TokenManager:
         project_id: Optional[str] = None,
         project_name: Optional[str] = None,
         remark: Optional[str] = None,
+        token_group: Optional[str] = None,
         image_enabled: Optional[bool] = None,
         video_enabled: Optional[bool] = None,
         image_concurrency: Optional[int] = None,
@@ -408,6 +451,7 @@ class TokenManager:
         proxy_url: Optional[str] = None,
         auto_refresh_enabled: Optional[bool] = None,
         refresh_interval_minutes: Optional[int] = None,
+        owner_client_id: Optional[int] = None,
     ):
         """Update token (支持修改project_id和project_name)
 
@@ -428,6 +472,8 @@ class TokenManager:
             update_fields["current_project_name"] = project_name
         if remark is not None:
             update_fields["remark"] = remark
+        if token_group is not None:
+            update_fields["token_group"] = token_group.strip() or "default"
         if image_enabled is not None:
             update_fields["image_enabled"] = image_enabled
         if video_enabled is not None:
@@ -454,6 +500,8 @@ class TokenManager:
             update_fields["auto_refresh_enabled"] = bool(auto_refresh_enabled)
         if refresh_interval_minutes is not None:
             update_fields["refresh_interval_minutes"] = self._normalize_refresh_interval(refresh_interval_minutes)
+        if owner_client_id is not None:
+            update_fields["owner_client_id"] = owner_client_id
 
         # 检查token是否因429被禁用，如果是且未过期，则清空429状态
         token = await self.db.get_token(token_id)
@@ -587,7 +635,13 @@ class TokenManager:
                     return True
 
             debug_logger.log_error(f"[AT_REFRESH] Token {token_id}: all refresh attempts failed, disabling token")
-            await self.disable_token(token_id)
+            latest = await self.db.get_token(token_id)
+            disable_reason = (
+                "429_rate_limit"
+                if latest and latest.ban_reason == "429_rate_limit"
+                else "at_refresh_failed"
+            )
+            await self.disable_token(token_id, reason=disable_reason)
             self._clear_at_validation_cache(token_id)
             return False
 
@@ -661,6 +715,11 @@ class TokenManager:
                     token_id,
                     credits=credits_result.get("credits", 0),
                     user_paygate_tier=credits_result.get("userPaygateTier"),
+                    is_active=True,
+                    ban_reason=None,
+                    banned_at=None,
+                    last_st_refresh_at=datetime.now(timezone.utc),
+                    last_st_refresh_result="AT refresh success",
                 )
                 self._mark_at_valid(token_id)
                 debug_logger.log_info(f"[AT_REFRESH] Token {token_id}: AT 验证成功（余额: {credits_result.get('credits', 0)}）")
@@ -671,16 +730,19 @@ class TokenManager:
                 error_msg = str(verify_err)
                 if "401" in error_msg or "UNAUTHENTICATED" in error_msg:
                     debug_logger.log_warning(f"[AT_REFRESH] Token {token_id}: AT 验证失败 (401)，ST 可能已过期")
+                    await self._record_refresh_result(token_id, f"AT validation failed: {error_msg}")
                     record_token_refresh("at", "failure")
                     return False
                 else:
                     # 其他错误（如网络问题），仍视为成功
                     debug_logger.log_warning(f"[AT_REFRESH] Token {token_id}: AT 验证时发生非认证错误: {error_msg}")
+                    await self._record_refresh_result(token_id, f"AT refresh success; credits validation warning: {error_msg}")
                     record_token_refresh("at", "success")
                     return True
 
         except Exception as e:
             debug_logger.log_error(f"[AT_REFRESH] Token {token_id}: AT刷新失败 - {str(e)}")
+            await self._record_refresh_result(token_id, f"AT refresh failed: {str(e)}")
             record_token_refresh("at", "failure")
             return False
 
@@ -805,7 +867,13 @@ class TokenManager:
         )
         async with refresh_lock:
             latest = await self.db.get_token(token_id)
-            if not latest or not latest.is_active:
+            if not latest:
+                return
+            recoverable_inactive = (
+                not latest.is_active
+                and (latest.ban_reason or "") == "at_refresh_failed"
+            )
+            if not latest.is_active and not recoverable_inactive:
                 return
             if not latest.auto_refresh_enabled:
                 return
@@ -828,6 +896,9 @@ class TokenManager:
                     "st": new_st,
                     "at": new_at,
                     "at_expires": self._parse_at_expires(session.get("expires")),
+                    "is_active": True,
+                    "ban_reason": None,
+                    "banned_at": None,
                     "last_st_refresh_at": now,
                     "last_st_refresh_result": "success",
                 }
@@ -868,15 +939,26 @@ class TokenManager:
         if not refresh_config or not refresh_config.enabled:
             return
 
-        tokens = await self.db.get_active_tokens()
+        tokens = await self.db.get_all_tokens()
         now = datetime.now(timezone.utc)
         for token in tokens:
             try:
                 if not token.auto_refresh_enabled:
                     continue
+                recoverable_inactive = (
+                    not token.is_active
+                    and (token.ban_reason or "") == "at_refresh_failed"
+                    and self._normalize_protocol_mode(token.protocol_mode) == "protocol"
+                )
+                if not token.is_active and not recoverable_inactive:
+                    continue
                 if self._normalize_protocol_mode(token.protocol_mode) != "protocol":
+                    if token.is_active and self._should_refresh_at(token):
+                        await self._refresh_at(token.id)
                     continue
                 if not (token.google_cookies or "").strip():
+                    if token.is_active and self._should_refresh_at(token):
+                        await self._refresh_at(token.id)
                     continue
 
                 interval_minutes = token.refresh_interval_minutes or refresh_config.refresh_interval_minutes or 120

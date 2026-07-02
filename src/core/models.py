@@ -19,6 +19,8 @@ class Token(BaseModel):
     email: str
     name: Optional[str] = ""
     remark: Optional[str] = None
+    token_group: str = "default"
+    owner_client_id: Optional[int] = None
     is_active: bool = True
     created_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
@@ -58,6 +60,7 @@ class Token(BaseModel):
     # 429禁用相关
     ban_reason: Optional[str] = None  # 禁用原因: "429_rate_limit" 或 None
     banned_at: Optional[datetime] = None  # 禁用时间
+    cooldown_until: Optional[datetime] = None
 
 
 class Project(BaseModel):
@@ -113,6 +116,8 @@ class RequestLog(BaseModel):
 
     id: Optional[int] = None
     token_id: Optional[int] = None
+    api_client_id: Optional[int] = None
+    api_client_name: Optional[str] = None
     operation: str
     request_body: Optional[str] = None
     response_body: Optional[str] = None
@@ -132,6 +137,37 @@ class AdminConfig(BaseModel):
     password: str
     api_key: str
     error_ban_threshold: int = 3  # Auto-disable token after N consecutive errors
+
+
+class ApiClient(BaseModel):
+    """Per-user API key client."""
+
+    id: Optional[int] = None
+    name: str
+    username: Optional[str] = None
+    password_hash: str = ""
+    role: str = "user"
+    api_key: str
+    plugin_connection_token: Optional[str] = None
+    is_active: bool = True
+    daily_limit: Optional[int] = None
+    total_limit: Optional[int] = None
+    success_count: int = 0
+    today_success_count: int = 0
+    today_date: Optional[str] = None
+    last_used_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class ApiClientTokenBinding(BaseModel):
+    """Token binding for a per-user API client."""
+
+    id: Optional[int] = None
+    client_id: int
+    token_id: int
+    generation_type: str = "all"
+    created_at: Optional[datetime] = None
 
 
 class ProxyConfig(BaseModel):

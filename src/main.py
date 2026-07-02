@@ -340,6 +340,6 @@ async def metrics():
     return Response(content=payload, media_type=CONTENT_TYPE_LATEST)
 def _ensure_admin_page_session(request: Request):
     token = admin.get_admin_token_from_cookie(request)
-    if not admin.is_admin_session_token_valid(token):
+    if not admin.is_console_session_token_valid(token):
         return RedirectResponse(url="/login", status_code=302)
     return None

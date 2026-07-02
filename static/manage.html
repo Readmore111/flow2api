@@ -10,6 +10,8 @@
         .animate-slide-up{animation:slide-up .3s ease-out}
         .tab-btn{transition:all .2s ease}
         .line-clamp-2{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
+        body[data-role="user"] .admin-only{display:none!important}
+        body[data-role="user"] #tokenTableBody button{display:none!important}
     </style>
     <script>
         tailwind.config={theme:{extend:{colors:{border:"hsl(0 0% 89%)",input:"hsl(0 0% 89%)",ring:"hsl(0 0% 3.9%)",background:"hsl(0 0% 100%)",foreground:"hsl(0 0% 3.9%)",primary:{DEFAULT:"hsl(0 0% 9%)",foreground:"hsl(0 0% 98%)"},secondary:{DEFAULT:"hsl(0 0% 96.1%)",foreground:"hsl(0 0% 9%)"},muted:{DEFAULT:"hsl(0 0% 96.1%)",foreground:"hsl(0 0% 45.1%)"},destructive:{DEFAULT:"hsl(0 84.2% 60.2%)",foreground:"hsl(0 0% 98%)"}}}}}
@@ -23,11 +25,6 @@
                 <span class="font-bold text-xl">Flow2API</span>
             </div>
             <div class="flex flex-1 items-center justify-end gap-3">
-                <a href="https://github.com/TheSmallHanCat/flow2api" target="_blank" class="inline-flex items-center justify-center text-xs transition-colors hover:bg-accent hover:text-accent-foreground h-7 px-2.5" title="GitHub 仓库">
-                    <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v 3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-                    </svg>
-                </a>
                 <button onclick="logout()" class="inline-flex items-center justify-center text-xs transition-colors hover:bg-accent hover:text-accent-foreground h-7 px-2.5 gap-1">
                     <svg class="h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -45,6 +42,7 @@
         <div class="border-b border-border mb-6">
             <nav class="flex space-x-8">
                 <button onclick="switchTab('tokens')" id="tabTokens" class="tab-btn border-b-2 border-primary text-sm font-medium py-3 px-1">Token 管理</button>
+                <button onclick="switchTab('clients')" id="tabClients" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">用户管理</button>
                 <button onclick="switchTab('settings')" id="tabSettings" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">系统配置</button>
                 <button onclick="switchTab('logs')" id="tabLogs" class="tab-btn border-b-2 border-transparent text-sm font-medium py-3 px-1">请求日志</button>
                 <a href="/test" id="tabTestPage" class="tab-btn inline-flex items-center border-b-2 border-transparent text-sm font-medium py-3 px-1">测试页面</a>
@@ -149,6 +147,176 @@
                             <!-- 动态填充 -->
                         </tbody>
                     </table>
+                </div>
+            </div>
+        </div>
+
+        <div id="panelClients" class="hidden">
+            <div class="grid gap-4 lg:grid-cols-[360px_1fr]">
+                <div class="rounded-lg border border-border bg-background p-5">
+                    <h3 class="text-base font-semibold mb-4">创建用户账号</h3>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="text-sm font-medium mb-1.5 block">用户名称</label>
+                            <input id="clientName" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="例如：设计组-Alice">
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium mb-1.5 block">登录账号</label>
+                            <input id="clientUsername" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="例如：alice">
+                        </div>
+                        <div>
+                            <label class="text-sm font-medium mb-1.5 block">登录密码</label>
+                            <input id="clientPassword" type="password" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="用于登录后台">
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="text-sm font-medium mb-1.5 block">每日额度</label>
+                                <input id="clientDailyLimit" type="number" min="0" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="不限">
+                            </div>
+                            <div>
+                                <label class="text-sm font-medium mb-1.5 block">总额度</label>
+                                <input id="clientTotalLimit" type="number" min="0" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="不限">
+                            </div>
+                        </div>
+                        <button onclick="createApiClient()" class="inline-flex h-9 w-full items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90">创建用户</button>
+                        <p id="clientCreateResult" class="text-xs text-muted-foreground break-all"></p>
+                    </div>
+                </div>
+                <div class="rounded-lg border border-border bg-background">
+                    <div class="flex items-center justify-between border-b border-border p-4">
+                        <div>
+                            <h3 class="text-base font-semibold">用户账号管理</h3>
+                            <p class="mt-1 text-xs text-muted-foreground">每个用户可登录后台，API Key 和插件连接 Token 默认生成，并可由管理员绑定指定 Token 池。</p>
+                        </div>
+                        <button onclick="loadClients()" class="inline-flex h-8 items-center justify-center rounded-md border border-input px-3 text-sm hover:bg-accent">刷新</button>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full table-auto text-sm">
+                            <thead>
+                                <tr class="border-b border-border bg-muted/30">
+                                    <th class="h-10 px-3 text-left font-medium text-muted-foreground">用户</th>
+                                    <th class="h-10 px-3 text-left font-medium text-muted-foreground">API Key</th>
+                                    <th class="h-10 px-3 text-center font-medium text-muted-foreground">状态</th>
+                                    <th class="h-10 px-3 text-center font-medium text-muted-foreground">今日/总成功</th>
+                                    <th class="h-10 px-3 text-left font-medium text-muted-foreground">绑定 Token</th>
+                                    <th class="h-10 px-3 text-right font-medium text-muted-foreground">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="clientsTableBody" class="divide-y divide-border"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="clientBindModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+            <div class="w-full max-w-3xl rounded-lg border border-border bg-background shadow-xl">
+                <div class="flex items-start justify-between border-b border-border p-5">
+                    <div>
+                        <h3 class="text-base font-semibold">绑定 Token</h3>
+                        <p id="clientBindName" class="mt-1 text-xs text-muted-foreground"></p>
+                    </div>
+                    <button onclick="closeClientBindModal()" class="rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent">关闭</button>
+                </div>
+                <div class="max-h-[60vh] overflow-y-auto p-5">
+                    <div class="mb-3 rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                        勾选后，该用户 API Key 只会使用选中的 Token；不勾选任何 Token 表示该用户暂无可用 Token 池。
+                    </div>
+                    <div class="overflow-x-auto rounded-md border border-border">
+                        <table class="w-full table-auto text-sm">
+                            <thead class="bg-muted/40">
+                                <tr>
+                                    <th class="h-10 px-3 text-left font-medium text-muted-foreground">Token</th>
+                                    <th class="h-10 px-3 text-center font-medium text-muted-foreground">状态</th>
+                                    <th class="h-10 px-3 text-center font-medium text-muted-foreground">实时负载</th>
+                                    <th class="h-10 px-3 text-left font-medium text-muted-foreground">绑定类型</th>
+                                </tr>
+                            </thead>
+                            <tbody id="clientBindTokenRows" class="divide-y divide-border"></tbody>
+                        </table>
+                    </div>
+                    <p id="clientBindSummary" class="mt-3 text-xs text-muted-foreground"></p>
+                </div>
+                <div class="flex items-center justify-end gap-2 border-t border-border p-4">
+                    <button onclick="closeClientBindModal()" class="inline-flex h-9 items-center justify-center rounded-md border border-input px-4 text-sm hover:bg-accent">取消</button>
+                    <button onclick="saveClientBindings()" class="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90">保存绑定</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="clientDetailModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/40 p-4">
+            <div class="w-full max-w-3xl rounded-lg border border-border bg-background shadow-xl">
+                <div class="flex items-start justify-between border-b border-border p-5">
+                    <div>
+                        <h3 class="text-base font-semibold">用户详情</h3>
+                        <p id="clientDetailName" class="mt-1 text-xs text-muted-foreground"></p>
+                    </div>
+                    <button onclick="closeClientDetailModal()" class="rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-accent">关闭</button>
+                </div>
+                <div class="max-h-[68vh] overflow-y-auto p-5">
+                    <div class="grid gap-4 md:grid-cols-2">
+                        <div class="space-y-2 text-sm">
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">用户 ID</span>
+                                <span id="clientDetailId" class="font-mono"></span>
+                            </div>
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">状态</span>
+                                <span id="clientDetailStatus"></span>
+                            </div>
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">今日成功</span>
+                                <span id="clientDetailToday"></span>
+                            </div>
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">总成功</span>
+                                <span id="clientDetailTotal"></span>
+                            </div>
+                        </div>
+                        <div class="space-y-2 text-sm">
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">每日额度</span>
+                                <span id="clientDetailDailyLimit"></span>
+                            </div>
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">总额度</span>
+                                <span id="clientDetailTotalLimit"></span>
+                            </div>
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">创建时间</span>
+                                <span id="clientDetailCreated"></span>
+                            </div>
+                            <div class="flex items-center justify-between gap-3">
+                                <span class="text-muted-foreground">更新时间</span>
+                                <span id="clientDetailUpdated"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-5">
+                        <label class="mb-1.5 block text-sm font-medium">完整 API Key</label>
+                        <div class="flex gap-2">
+                            <input id="clientDetailApiKey" readonly class="flex h-9 min-w-0 flex-1 rounded-md border border-input bg-background px-3 py-2 font-mono text-xs">
+                            <button onclick="copyClientDetailApiKey()" class="inline-flex h-9 items-center justify-center rounded-md border border-input px-3 text-sm hover:bg-accent">复制</button>
+                        </div>
+                    </div>
+                    <div class="mt-5 overflow-x-auto rounded-md border border-border">
+                        <table class="w-full table-auto text-sm">
+                            <thead class="bg-muted/40">
+                                <tr>
+                                    <th class="h-10 px-3 text-left font-medium text-muted-foreground">绑定 Token</th>
+                                    <th class="h-10 px-3 text-left font-medium text-muted-foreground">类型</th>
+                                </tr>
+                            </thead>
+                            <tbody id="clientDetailBindings" class="divide-y divide-border"></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between gap-2 border-t border-border p-4">
+                    <button id="clientDetailDeleteBtn" onclick="deleteClientFromDetail()" class="inline-flex h-9 items-center justify-center rounded-md border border-red-200 px-4 text-sm text-red-700 hover:bg-red-50">删除用户</button>
+                    <div class="flex items-center gap-2">
+                        <button onclick="closeClientDetailModal()" class="inline-flex h-9 items-center justify-center rounded-md border border-input px-4 text-sm hover:bg-accent">关闭</button>
+                        <button id="clientDetailBindBtn" onclick="bindClientFromDetail()" class="inline-flex h-9 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90">绑定 Token</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -349,6 +517,16 @@
                             </p>
                         </div>
                     </div>
+                        <div class="rounded-md bg-green-50 p-3 border border-green-200">
+                            <h4 class="text-sm font-semibold text-green-900 mb-2">账号池添加向导</h4>
+                            <ol class="list-decimal list-inside space-y-1 text-xs text-green-800">
+                                <li>复制上面的连接接口和连接 Token 到 Chrome 扩展。</li>
+                                <li>扩展里的 WebSocket URL 使用 <code class="bg-white px-1 py-0.5 rounded">wss://niktokfurniture.com/captcha_ws</code>。</li>
+                                <li>在 Chrome 登录一个 Google 账号，并打开该账号的 Flow 项目页面。</li>
+                                <li>在扩展设置页点击“导入当前 Flow 账号”。</li>
+                                <li>回到本页刷新 Token 列表，确认账号数量增加。</li>
+                            </ol>
+                        </div>
                     <button onclick="savePluginConfig()" class="inline-flex items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 w-full mt-4">保存配置</button>
                 </div>
 
@@ -681,6 +859,11 @@
                     <input id="addTokenRemark" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="添加备注信息">
                 </div>
 
+                <div class="space-y-2">
+                    <label class="text-sm font-medium">分组 <span class="text-muted-foreground text-xs">- 可选</span></label>
+                    <input id="addTokenGroup" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="例如：家具主图组 / Pro组 / 备用组">
+                </div>
+
                 <!-- Project ID -->
                 <div class="space-y-2">
                     <label class="text-sm font-medium">Project ID <span class="text-muted-foreground text-xs">- 可选</span></label>
@@ -803,6 +986,11 @@
                 <div class="space-y-2">
                     <label class="text-sm font-medium">备注 <span class="text-muted-foreground text-xs">- 可选</span></label>
                     <input id="editTokenRemark" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="添加备注信息">
+                </div>
+
+                <div class="space-y-2">
+                    <label class="text-sm font-medium">分组 <span class="text-muted-foreground text-xs">- 可选</span></label>
+                    <input id="editTokenGroup" class="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm" placeholder="例如：家具主图组 / Pro组 / 备用组">
                 </div>
 
                 <!-- Project ID -->
@@ -940,8 +1128,11 @@
 
     <script>
         let allTokens=[];
+        window.flow2apiSession={role:'admin',is_admin:true};
         const $=(id)=>document.getElementById(id),
         apiRequest=async(url,opts={})=>{const headers={...opts.headers};if(!headers['Content-Type'])headers['Content-Type']='application/json';const r=await fetch(url,{credentials:'include',...opts,headers});return r.status===401?(location.href='/login',null):r},
+        loadConsoleSession=async()=>{try{const r=await apiRequest('/api/session');if(!r)return;const d=await r.json();window.flow2apiSession=d||{role:'admin',is_admin:true};applyConsoleRole()}catch(e){console.error('加载会话失败:',e)}},
+        applyConsoleRole=()=>{const s=window.flow2apiSession||{},isAdmin=s.role==='admin'||s.is_admin===true;document.body.dataset.role=isAdmin?'admin':'user';['tabClients','panelClients'].forEach(id=>{const el=$(id);if(el)el.classList.toggle('admin-only',!isAdmin)});document.querySelectorAll('[onclick="openAddModal()"],[onclick="openImportModal()"],[onclick="exportTokens()"],[onclick="clearAllLogs()"]').forEach(el=>el.classList.toggle('admin-only',!isAdmin));const settingsGrid=$('panelSettings')?.querySelector('.grid');if(settingsGrid){Array.from(settingsGrid.children).forEach(card=>{const keep=card.querySelector('#cfgCurrentAPIKey,#cfgPluginConnectionUrl');card.classList.toggle('admin-only',!isAdmin&&!keep)})}if(!isAdmin){const apiNew=$('cfgNewAPIKey');if(apiNew?.parentElement)apiNew.parentElement.classList.add('hidden');document.querySelector('[onclick="updateAPIKey()"]')?.classList.add('hidden');$('cfgPluginConnectionToken')?.setAttribute('readonly','readonly');$('cfgPluginConnectionToken')?.classList.add('bg-muted');document.querySelector('[onclick="generateRandomToken()"]')?.classList.add('hidden');document.querySelector('[onclick="savePluginConfig()"]')?.classList.add('hidden');$('cfgAutoEnableOnUpdate')?.closest('div')?.classList.add('hidden')}},
         loadStats=async()=>{try{const r=await apiRequest('/api/stats');if(!r)return;const d=await r.json();$('statTotal').textContent=d.total_tokens||0;$('statActive').textContent=d.active_tokens||0;$('statImages').textContent=(d.today_images||0)+'/'+(d.total_images||0);$('statVideos').textContent=(d.today_videos||0)+'/'+(d.total_videos||0);$('statErrors').textContent=(d.today_errors||0)+'/'+(d.total_errors||0)}catch(e){console.error('加载统计失败:',e)}},
         loadTokens=async()=>{try{const r=await apiRequest('/api/tokens');if(!r)return;allTokens=await r.json();renderTokens()}catch(e){console.error('加载Token失败:',e)}},
         formatExpiry=exp=>{if(!exp)return'<span class="text-muted-foreground">-</span>';const d=new Date(exp),now=new Date(),diff=d-now;const dateStr=d.toLocaleDateString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit'}).replace(/\//g,'-');const timeStr=d.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});const hours=Math.floor(diff/36e5);if(diff<0)return`<span class="text-red-600 font-medium" title="已过期">已过期</span>`;if(hours<1)return`<span class="text-red-600 font-medium" title="${dateStr} ${timeStr}">${Math.floor(diff/6e4)}分钟</span>`;if(hours<24)return`<span class="text-orange-600 font-medium" title="${dateStr} ${timeStr}">${hours}小时</span>`;const days=Math.floor(diff/864e5);if(days<7)return`<span class="text-orange-600" title="${dateStr} ${timeStr}">${days}天</span>`;return`<span class="text-muted-foreground" title="${dateStr} ${timeStr}">${days}天</span>`},
@@ -958,13 +1149,13 @@
         refreshTokenAT=async(id)=>{try{showToast('正在更新AT...','info');const r=await apiRequest(`/api/tokens/${id}/refresh-at`,{method:'POST'});if(!r)return;const d=await r.json();if(d.success){const expiresDate=d.token.at_expires?new Date(d.token.at_expires):null;const expiresStr=expiresDate?expiresDate.toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).replace(/\//g,'-'):'未知';showToast(`AT更新成功! 新过期时间: ${expiresStr}`,'success');await refreshTokens()}else{showToast('更新失败: '+(d.detail||'未知错误'),'error')}}catch(e){showToast('更新失败: '+e.message,'error')}},
         refreshTokens=async()=>{await loadTokens();await loadStats()},
         openAddModal=()=>$('addModal').classList.remove('hidden'),
-        closeAddModal=()=>{$('addModal').classList.add('hidden');$('addTokenST').value='';$('addTokenRemark').value='';$('addTokenProjectId').value='';$('addTokenProjectName').value='';$('addTokenCaptchaProxyUrl').value='';$('addTokenProtocolMode').value='session';$('addTokenGoogleCookies').value='';$('addTokenLoginAccount').value='';$('addTokenLoginPassword').value='';$('addTokenProxyUrl').value='';$('addTokenAutoRefreshEnabled').checked=true;$('addTokenRefreshIntervalMinutes').value='120';$('addTokenImageEnabled').checked=true;$('addTokenVideoEnabled').checked=true;$('addTokenImageConcurrency').value='-1';$('addTokenVideoConcurrency').value='-1'},
-        openEditModal=(id)=>{const token=allTokens.find(t=>t.id===id);if(!token)return showToast('Token不存在','error');$('editTokenId').value=token.id;$('editTokenST').value=token.st||'';$('editTokenRemark').value=token.remark||'';$('editTokenProjectId').value=token.current_project_id||'';$('editTokenProjectName').value=token.current_project_name||'';$('editTokenCaptchaProxyUrl').value=token.captcha_proxy_url||'';$('editTokenProtocolMode').value=token.protocol_mode||'session';$('editTokenGoogleCookies').value=token.google_cookies||'';$('editTokenLoginAccount').value=token.login_account||'';$('editTokenLoginPassword').value='';$('editTokenProxyUrl').value=token.proxy_url||'';$('editTokenAutoRefreshEnabled').checked=token.auto_refresh_enabled!==false;$('editTokenRefreshIntervalMinutes').value=token.refresh_interval_minutes||120;$('editTokenImageEnabled').checked=token.image_enabled!==false;$('editTokenVideoEnabled').checked=token.video_enabled!==false;$('editTokenImageConcurrency').value=token.image_concurrency||'-1';$('editTokenVideoConcurrency').value=token.video_concurrency||'-1';$('editModal').classList.remove('hidden')},
-        closeEditModal=()=>{$('editModal').classList.add('hidden');$('editTokenId').value='';$('editTokenST').value='';$('editTokenRemark').value='';$('editTokenProjectId').value='';$('editTokenProjectName').value='';$('editTokenCaptchaProxyUrl').value='';$('editTokenProtocolMode').value='session';$('editTokenGoogleCookies').value='';$('editTokenLoginAccount').value='';$('editTokenLoginPassword').value='';$('editTokenProxyUrl').value='';$('editTokenAutoRefreshEnabled').checked=true;$('editTokenRefreshIntervalMinutes').value='120';$('editTokenImageEnabled').checked=true;$('editTokenVideoEnabled').checked=true;$('editTokenImageConcurrency').value='';$('editTokenVideoConcurrency').value=''},
-        submitEditToken=async()=>{const id=parseInt($('editTokenId').value),st=$('editTokenST').value.trim(),remark=$('editTokenRemark').value.trim(),projectId=$('editTokenProjectId').value.trim(),projectName=$('editTokenProjectName').value.trim(),captchaProxyUrl=$('editTokenCaptchaProxyUrl').value.trim(),protocolMode=$('editTokenProtocolMode').value,googleCookies=$('editTokenGoogleCookies').value.trim(),loginAccount=$('editTokenLoginAccount').value.trim(),loginPassword=$('editTokenLoginPassword').value,proxyUrl=$('editTokenProxyUrl').value.trim(),autoRefreshEnabled=$('editTokenAutoRefreshEnabled').checked,refreshIntervalMinutes=parseInt($('editTokenRefreshIntervalMinutes').value)||120,imageEnabled=$('editTokenImageEnabled').checked,videoEnabled=$('editTokenVideoEnabled').checked,imageConcurrency=$('editTokenImageConcurrency').value?parseInt($('editTokenImageConcurrency').value):null,videoConcurrency=$('editTokenVideoConcurrency').value?parseInt($('editTokenVideoConcurrency').value):null;if(!id)return showToast('Token ID无效','error');if(!st)return showToast('请输入 Session Token','error');const btn=$('editTokenBtn'),btnText=$('editTokenBtnText'),btnSpinner=$('editTokenBtnSpinner');btn.disabled=true;btnText.textContent='保存中...';btnSpinner.classList.remove('hidden');try{const r=await apiRequest(`/api/tokens/${id}`,{method:'PUT',body:JSON.stringify({st:st,remark:remark||null,project_id:projectId||null,project_name:projectName||null,captcha_proxy_url:captchaProxyUrl,protocol_mode:protocolMode,google_cookies:googleCookies,login_account:loginAccount,login_password:loginPassword||null,proxy_url:proxyUrl,auto_refresh_enabled:autoRefreshEnabled,refresh_interval_minutes:refreshIntervalMinutes,image_enabled:imageEnabled,video_enabled:videoEnabled,image_concurrency:imageConcurrency,video_concurrency:videoConcurrency})});if(!r){btn.disabled=false;btnText.textContent='保存';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeEditModal();await refreshTokens();showToast('Token更新成功','success')}else{showToast('更新失败: '+(d.detail||d.message||'未知错误'),'error')}}catch(e){showToast('更新失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='保存';btnSpinner.classList.add('hidden')}},
+        closeAddModal=()=>{$('addModal').classList.add('hidden');$('addTokenST').value='';$('addTokenRemark').value='';$('addTokenGroup').value='';$('addTokenProjectId').value='';$('addTokenProjectName').value='';$('addTokenCaptchaProxyUrl').value='';$('addTokenProtocolMode').value='session';$('addTokenGoogleCookies').value='';$('addTokenLoginAccount').value='';$('addTokenLoginPassword').value='';$('addTokenProxyUrl').value='';$('addTokenAutoRefreshEnabled').checked=true;$('addTokenRefreshIntervalMinutes').value='120';$('addTokenImageEnabled').checked=true;$('addTokenVideoEnabled').checked=true;$('addTokenImageConcurrency').value='-1';$('addTokenVideoConcurrency').value='-1'},
+        openEditModal=(id)=>{const token=allTokens.find(t=>t.id===id);if(!token)return showToast('Token不存在','error');$('editTokenId').value=token.id;$('editTokenST').value=token.st||'';$('editTokenRemark').value=token.remark||'';$('editTokenGroup').value=token.token_group||'default';$('editTokenProjectId').value=token.current_project_id||'';$('editTokenProjectName').value=token.current_project_name||'';$('editTokenCaptchaProxyUrl').value=token.captcha_proxy_url||'';$('editTokenProtocolMode').value=token.protocol_mode||'session';$('editTokenGoogleCookies').value=token.google_cookies||'';$('editTokenLoginAccount').value=token.login_account||'';$('editTokenLoginPassword').value='';$('editTokenProxyUrl').value=token.proxy_url||'';$('editTokenAutoRefreshEnabled').checked=token.auto_refresh_enabled!==false;$('editTokenRefreshIntervalMinutes').value=token.refresh_interval_minutes||120;$('editTokenImageEnabled').checked=token.image_enabled!==false;$('editTokenVideoEnabled').checked=token.video_enabled!==false;$('editTokenImageConcurrency').value=token.image_concurrency||'-1';$('editTokenVideoConcurrency').value=token.video_concurrency||'-1';$('editModal').classList.remove('hidden')},
+        closeEditModal=()=>{$('editModal').classList.add('hidden');$('editTokenId').value='';$('editTokenST').value='';$('editTokenRemark').value='';$('editTokenGroup').value='';$('editTokenProjectId').value='';$('editTokenProjectName').value='';$('editTokenCaptchaProxyUrl').value='';$('editTokenProtocolMode').value='session';$('editTokenGoogleCookies').value='';$('editTokenLoginAccount').value='';$('editTokenLoginPassword').value='';$('editTokenProxyUrl').value='';$('editTokenAutoRefreshEnabled').checked=true;$('editTokenRefreshIntervalMinutes').value='120';$('editTokenImageEnabled').checked=true;$('editTokenVideoEnabled').checked=true;$('editTokenImageConcurrency').value='';$('editTokenVideoConcurrency').value=''},
+        submitEditToken=async()=>{const id=parseInt($('editTokenId').value),st=$('editTokenST').value.trim(),remark=$('editTokenRemark').value.trim(),tokenGroup=$('editTokenGroup').value.trim(),projectId=$('editTokenProjectId').value.trim(),projectName=$('editTokenProjectName').value.trim(),captchaProxyUrl=$('editTokenCaptchaProxyUrl').value.trim(),protocolMode=$('editTokenProtocolMode').value,googleCookies=$('editTokenGoogleCookies').value.trim(),loginAccount=$('editTokenLoginAccount').value.trim(),loginPassword=$('editTokenLoginPassword').value,proxyUrl=$('editTokenProxyUrl').value.trim(),autoRefreshEnabled=$('editTokenAutoRefreshEnabled').checked,refreshIntervalMinutes=parseInt($('editTokenRefreshIntervalMinutes').value)||120,imageEnabled=$('editTokenImageEnabled').checked,videoEnabled=$('editTokenVideoEnabled').checked,imageConcurrency=$('editTokenImageConcurrency').value?parseInt($('editTokenImageConcurrency').value):null,videoConcurrency=$('editTokenVideoConcurrency').value?parseInt($('editTokenVideoConcurrency').value):null;if(!id)return showToast('Token ID无效','error');if(!st)return showToast('请输入 Session Token','error');const btn=$('editTokenBtn'),btnText=$('editTokenBtnText'),btnSpinner=$('editTokenBtnSpinner');btn.disabled=true;btnText.textContent='保存中...';btnSpinner.classList.remove('hidden');try{const r=await apiRequest(`/api/tokens/${id}`,{method:'PUT',body:JSON.stringify({st:st,remark:remark||null,token_group:tokenGroup||'default',project_id:projectId||null,project_name:projectName||null,captcha_proxy_url:captchaProxyUrl,protocol_mode:protocolMode,google_cookies:googleCookies,login_account:loginAccount,login_password:loginPassword||null,proxy_url:proxyUrl,auto_refresh_enabled:autoRefreshEnabled,refresh_interval_minutes:refreshIntervalMinutes,image_enabled:imageEnabled,video_enabled:videoEnabled,image_concurrency:imageConcurrency,video_concurrency:videoConcurrency})});if(!r){btn.disabled=false;btnText.textContent='保存';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeEditModal();await refreshTokens();showToast('Token更新成功','success')}else{showToast('更新失败: '+(d.detail||d.message||'未知错误'),'error')}}catch(e){showToast('更新失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='保存';btnSpinner.classList.add('hidden')}},
         convertST2AT=async()=>{const st=$('addTokenST').value.trim();if(!st)return showToast('请先输入 Session Token','error');try{showToast('正在转换 ST→AT...','info');const r=await apiRequest('/api/tokens/st2at',{method:'POST',body:JSON.stringify({st:st})});if(!r)return;const d=await r.json();if(d.success&&d.access_token){$('addTokenAT').value=d.access_token;showToast('转换成功！AT已自动填入','success')}else{showToast('转换失败: '+(d.message||d.detail||'未知错误'),'error')}}catch(e){showToast('转换失败: '+e.message,'error')}},
         convertEditST2AT=async()=>{const st=$('editTokenST').value.trim();if(!st)return showToast('请先输入 Session Token','error');try{showToast('正在转换 ST→AT...','info');const r=await apiRequest('/api/tokens/st2at',{method:'POST',body:JSON.stringify({st:st})});if(!r)return;const d=await r.json();if(d.success&&d.access_token){$('editTokenAT').value=d.access_token;showToast('转换成功！AT已自动填入','success')}else{showToast('转换失败: '+(d.message||d.detail||'未知错误'),'error')}}catch(e){showToast('转换失败: '+e.message,'error')}},
-        submitAddToken=async()=>{const st=$('addTokenST').value.trim(),remark=$('addTokenRemark').value.trim(),projectId=$('addTokenProjectId').value.trim(),projectName=$('addTokenProjectName').value.trim(),captchaProxyUrl=$('addTokenCaptchaProxyUrl').value.trim(),protocolMode=$('addTokenProtocolMode').value,googleCookies=$('addTokenGoogleCookies').value.trim(),loginAccount=$('addTokenLoginAccount').value.trim(),loginPassword=$('addTokenLoginPassword').value,proxyUrl=$('addTokenProxyUrl').value.trim(),autoRefreshEnabled=$('addTokenAutoRefreshEnabled').checked,refreshIntervalMinutes=parseInt($('addTokenRefreshIntervalMinutes').value)||120,imageEnabled=$('addTokenImageEnabled').checked,videoEnabled=$('addTokenVideoEnabled').checked,imageConcurrency=parseInt($('addTokenImageConcurrency').value)||(-1),videoConcurrency=parseInt($('addTokenVideoConcurrency').value)||(-1);if(!st)return showToast('请输入 Session Token','error');const btn=$('addTokenBtn'),btnText=$('addTokenBtnText'),btnSpinner=$('addTokenBtnSpinner');btn.disabled=true;btnText.textContent='添加中...';btnSpinner.classList.remove('hidden');try{const r=await apiRequest('/api/tokens',{method:'POST',body:JSON.stringify({st:st,remark:remark||null,project_id:projectId||null,project_name:projectName||null,captcha_proxy_url:captchaProxyUrl,protocol_mode:protocolMode,google_cookies:googleCookies,login_account:loginAccount,login_password:loginPassword,proxy_url:proxyUrl,auto_refresh_enabled:autoRefreshEnabled,refresh_interval_minutes:refreshIntervalMinutes,image_enabled:imageEnabled,video_enabled:videoEnabled,image_concurrency:imageConcurrency,video_concurrency:videoConcurrency})});if(!r){btn.disabled=false;btnText.textContent='添加';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeAddModal();await refreshTokens();showToast('Token添加成功','success')}else{showToast('添加失败: '+(d.detail||d.message||'未知错误'),'error')}}catch(e){showToast('添加失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='添加';btnSpinner.classList.add('hidden')}},
+        submitAddToken=async()=>{const st=$('addTokenST').value.trim(),remark=$('addTokenRemark').value.trim(),tokenGroup=$('addTokenGroup').value.trim(),projectId=$('addTokenProjectId').value.trim(),projectName=$('addTokenProjectName').value.trim(),captchaProxyUrl=$('addTokenCaptchaProxyUrl').value.trim(),protocolMode=$('addTokenProtocolMode').value,googleCookies=$('addTokenGoogleCookies').value.trim(),loginAccount=$('addTokenLoginAccount').value.trim(),loginPassword=$('addTokenLoginPassword').value,proxyUrl=$('addTokenProxyUrl').value.trim(),autoRefreshEnabled=$('addTokenAutoRefreshEnabled').checked,refreshIntervalMinutes=parseInt($('addTokenRefreshIntervalMinutes').value)||120,imageEnabled=$('addTokenImageEnabled').checked,videoEnabled=$('addTokenVideoEnabled').checked,imageConcurrency=parseInt($('addTokenImageConcurrency').value)||(-1),videoConcurrency=parseInt($('addTokenVideoConcurrency').value)||(-1);if(!st)return showToast('请输入 Session Token','error');const btn=$('addTokenBtn'),btnText=$('addTokenBtnText'),btnSpinner=$('addTokenBtnSpinner');btn.disabled=true;btnText.textContent='添加中...';btnSpinner.classList.remove('hidden');try{const r=await apiRequest('/api/tokens',{method:'POST',body:JSON.stringify({st:st,remark:remark||null,token_group:tokenGroup||'default',project_id:projectId||null,project_name:projectName||null,captcha_proxy_url:captchaProxyUrl,protocol_mode:protocolMode,google_cookies:googleCookies,login_account:loginAccount,login_password:loginPassword,proxy_url:proxyUrl,auto_refresh_enabled:autoRefreshEnabled,refresh_interval_minutes:refreshIntervalMinutes,image_enabled:imageEnabled,video_enabled:videoEnabled,image_concurrency:imageConcurrency,video_concurrency:videoConcurrency})});if(!r){btn.disabled=false;btnText.textContent='添加';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeAddModal();await refreshTokens();showToast('Token添加成功','success')}else{showToast('添加失败: '+(d.detail||d.message||'未知错误'),'error')}}catch(e){showToast('添加失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='添加';btnSpinner.classList.add('hidden')}},
         testToken=async(id)=>{try{showToast('正在测试Token...','info');const r=await apiRequest(`/api/tokens/${id}/test`,{method:'POST'});if(!r)return;const d=await r.json();if(d.success&&d.status==='success'){let msg=`Token有效！用户: ${d.email||'未知'}`;if(d.sora2_supported){const remaining=d.sora2_total_count-d.sora2_redeemed_count;msg+=`\nSora2: 支持 (${remaining}/${d.sora2_total_count})`;if(d.sora2_remaining_count!==undefined){msg+=`\n可用次数: ${d.sora2_remaining_count}`}}showToast(msg,'success');await refreshTokens()}else{showToast(`Token无效: ${d.message||'未知错误'}`,'error')}}catch(e){showToast('测试失败: '+e.message,'error')}},
         toggleToken=async(id,isActive)=>{const action=isActive?'disable':'enable';try{const r=await apiRequest(`/api/tokens/${id}/${action}`,{method:'POST'});if(!r)return;const d=await r.json();d.success?(await refreshTokens(),showToast(isActive?'Token已禁用':'Token已启用','success')):showToast('操作失败','error')}catch(e){showToast('操作失败: '+e.message,'error')}},
         toggleTokenStatus=async(id,active)=>{try{const r=await apiRequest(`/api/tokens/${id}/status`,{method:'PUT',body:JSON.stringify({is_active:active})});if(!r)return;const d=await r.json();d.success?(await refreshTokens(),showToast('状态更新成功','success')):showToast('更新失败','error')}catch(e){showToast('更新失败: '+e.message,'error')}},
@@ -975,7 +1166,7 @@
         closeSora2Modal=()=>{$('sora2Modal').classList.add('hidden');$('sora2TokenId').value='';$('sora2InviteCode').value=''},
         openImportModal=()=>{$('importModal').classList.remove('hidden');$('importFile').value=''},
         closeImportModal=()=>{$('importModal').classList.add('hidden');$('importFile').value=''},
-        exportTokens=()=>{if(allTokens.length===0){showToast('没有Token可导出','error');return}const exportData=allTokens.map(t=>({email:t.email,access_token:t.token,session_token:t.st||null,is_active:t.is_active,captcha_proxy_url:t.captcha_proxy_url||'',image_enabled:t.image_enabled!==false,video_enabled:t.video_enabled!==false,image_concurrency:t.image_concurrency||(-1),video_concurrency:t.video_concurrency||(-1),protocol_mode:t.protocol_mode||'session',google_cookies:t.google_cookies||'',login_account:t.login_account||'',login_password:'',proxy_url:t.proxy_url||'',auto_refresh_enabled:t.auto_refresh_enabled!==false,refresh_interval_minutes:t.refresh_interval_minutes||120}));const dataStr=JSON.stringify(exportData,null,2);const dataBlob=new Blob([dataStr],{type:'application/json'});const url=URL.createObjectURL(dataBlob);const link=document.createElement('a');link.href=url;link.download=`tokens_${new Date().toISOString().split('T')[0]}.json`;document.body.appendChild(link);link.click();document.body.removeChild(link);URL.revokeObjectURL(url);showToast(`已导出 ${allTokens.length} 个Token`,'success')},
+        exportTokens=()=>{if(allTokens.length===0){showToast('没有Token可导出','error');return}const exportData=allTokens.map(t=>({email:t.email,access_token:t.token,session_token:t.st||null,is_active:t.is_active,token_group:t.token_group||'default',captcha_proxy_url:t.captcha_proxy_url||'',image_enabled:t.image_enabled!==false,video_enabled:t.video_enabled!==false,image_concurrency:t.image_concurrency||(-1),video_concurrency:t.video_concurrency||(-1),protocol_mode:t.protocol_mode||'session',google_cookies:t.google_cookies||'',login_account:t.login_account||'',login_password:'',proxy_url:t.proxy_url||'',auto_refresh_enabled:t.auto_refresh_enabled!==false,refresh_interval_minutes:t.refresh_interval_minutes||120}));const dataStr=JSON.stringify(exportData,null,2);const dataBlob=new Blob([dataStr],{type:'application/json'});const url=URL.createObjectURL(dataBlob);const link=document.createElement('a');link.href=url;link.download=`tokens_${new Date().toISOString().split('T')[0]}.json`;document.body.appendChild(link);link.click();document.body.removeChild(link);URL.revokeObjectURL(url);showToast(`已导出 ${allTokens.length} 个Token`,'success')},
         submitImportTokens=async()=>{const fileInput=$('importFile');if(!fileInput.files||fileInput.files.length===0){showToast('请选择文件','error');return}const file=fileInput.files[0];if(!file.name.endsWith('.json')){showToast('请选择JSON文件','error');return}try{const fileContent=await file.text();const importData=JSON.parse(fileContent);if(!Array.isArray(importData)){showToast('JSON格式错误：应为数组','error');return}if(importData.length===0){showToast('JSON文件为空','error');return}const btn=$('importBtn'),btnText=$('importBtnText'),btnSpinner=$('importBtnSpinner');btn.disabled=true;btnText.textContent='导入中...';btnSpinner.classList.remove('hidden');try{const r=await apiRequest('/api/tokens/import',{method:'POST',body:JSON.stringify({tokens:importData})});if(!r){btn.disabled=false;btnText.textContent='导入';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeImportModal();await refreshTokens();const msg=`导入成功！新增: ${d.added||0}, 更新: ${d.updated||0}`;showToast(msg,'success')}else{showToast('导入失败: '+(d.detail||d.message||'未知错误'),'error')}}catch(e){showToast('导入失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='导入';btnSpinner.classList.add('hidden')}}catch(e){showToast('文件解析失败: '+e.message,'error')}},
         submitSora2Activate=async()=>{const tokenId=parseInt($('sora2TokenId').value),inviteCode=$('sora2InviteCode').value.trim();if(!tokenId)return showToast('Token ID无效','error');if(!inviteCode)return showToast('请输入邀请码','error');if(inviteCode.length!==6)return showToast('邀请码必须是6位','error');const btn=$('sora2ActivateBtn'),btnText=$('sora2ActivateBtnText'),btnSpinner=$('sora2ActivateBtnSpinner');btn.disabled=true;btnText.textContent='激活中...';btnSpinner.classList.remove('hidden');try{showToast('正在激活Sora2...','info');const r=await apiRequest(`/api/tokens/${tokenId}/sora2/activate?invite_code=${inviteCode}`,{method:'POST'});if(!r){btn.disabled=false;btnText.textContent='激活';btnSpinner.classList.add('hidden');return}const d=await r.json();if(d.success){closeSora2Modal();await refreshTokens();if(d.already_accepted){showToast('Sora2已激活（之前已接受）','success')}else{showToast(`Sora2激活成功！邀请码: ${d.invite_code||'无'}`,'success')}}else{showToast('激活失败: '+(d.message||'未知错误'),'error')}}catch(e){showToast('激活失败: '+e.message,'error')}finally{btn.disabled=false;btnText.textContent='激活';btnSpinner.classList.add('hidden')}},
         loadAdminConfig=async()=>{try{const r=await apiRequest('/api/admin/config');if(!r)return;const d=await r.json();$('cfgErrorBan').value=d.error_ban_threshold||3;$('cfgAdminUsername').value=d.admin_username||'admin';$('cfgCurrentAPIKey').value=d.api_key||'';$('cfgDebugEnabled').checked=d.debug_enabled||false}catch(e){console.error('加载配置失败:',e)}},
@@ -1026,7 +1217,7 @@
         resumeCaptchaRuntimeStatusPollingIfNeeded=async(method)=>{if(method!=='browser'&&method!=='personal')return;const status=await pollCaptchaRuntimeStatus(method,{silent:true});if(status&&(status.active||status.task_running||status.state==='running'))startCaptchaRuntimeStatusPolling(method)},
         showToast=(m,t='info',duration=2000)=>{const d=document.createElement('div'),bc={success:'bg-green-600',error:'bg-destructive',info:'bg-primary'};d.className=`fixed bottom-4 right-4 ${bc[t]||bc.info} text-white px-4 py-2.5 rounded-lg shadow-lg text-sm font-medium z-50 animate-slide-up`;d.textContent=m;document.body.appendChild(d);setTimeout(()=>{d.style.opacity='0';d.style.transition='opacity .3s';setTimeout(()=>d.parentNode&&document.body.removeChild(d),300)},duration)},
         logout=async()=>{if(!confirm('确定要退出登录吗?'))return;try{await fetch('/api/admin/logout',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'}})}catch(e){console.error('服务端退出登录失败:',e)}finally{location.href='/login'}},
-        switchTab=t=>{const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopLogsAutoRefresh();loadAdminConfig();loadProxyConfig();loadCacheConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfig();loadPluginConfig();loadATAutoRefreshConfig()}else if(t==='logs'){startLogsAutoRefresh();loadLogs()}else{stopLogsAutoRefresh()}};
+        switchTab=t=>{const isAdmin=(window.flow2apiSession?.role==='admin'||window.flow2apiSession?.is_admin===true);if(!isAdmin&&t==='clients')t='tokens';const cap=n=>n.charAt(0).toUpperCase()+n.slice(1);['tokens','clients','settings','logs'].forEach(n=>{const active=n===t;$(`panel${cap(n)}`).classList.toggle('hidden',!active);$(`tab${cap(n)}`).classList.toggle('border-primary',active);$(`tab${cap(n)}`).classList.toggle('text-primary',active);$(`tab${cap(n)}`).classList.toggle('border-transparent',!active);$(`tab${cap(n)}`).classList.toggle('text-muted-foreground',!active)});if(t==='settings'){stopLogsAutoRefresh();window.stopTokenOpsRefresh&&window.stopTokenOpsRefresh();loadAdminConfig();loadPluginConfig();if(isAdmin){loadProxyConfig();loadCacheConfig();loadGenerationTimeout();loadCallLogicConfig();loadCaptchaConfig();loadATAutoRefreshConfig()}}else if(t==='logs'){window.stopTokenOpsRefresh&&window.stopTokenOpsRefresh();startLogsAutoRefresh();loadLogs()}else if(t==='clients'){stopLogsAutoRefresh();window.stopTokenOpsRefresh&&window.stopTokenOpsRefresh();window.loadClients&&window.loadClients();refreshTokens()}else{stopLogsAutoRefresh();window.startTokenOpsRefresh&&window.startTokenOpsRefresh();window.refreshTokenOps&&window.refreshTokenOps()}};
 
         function escapeLogHtml(text){
             if(text===null||text===undefined) return '';
@@ -1296,7 +1487,431 @@
             const detailContent=$('logDetailContent');detailContent.dataset.logId=String(log.id??'');detailContent.innerHTML=detailHtml;syncLogDetailViewState();
         }
 
-        window.addEventListener('DOMContentLoaded',()=>{refreshTokens();loadATAutoRefreshConfig()});
+        window.addEventListener('DOMContentLoaded',async()=>{await loadConsoleSession();refreshTokens();if(window.flow2apiSession?.role==='admin'||window.flow2apiSession?.is_admin===true)loadATAutoRefreshConfig()});
+    </script>
+    <script>
+    (() => {
+        const byId = id => document.getElementById(id);
+        let tokenOpsTimer = null;
+        let clientsCache = [];
+        let bindingClientId = null;
+        let bindingTokenCache = [];
+        let detailClientCache = null;
+
+        const api = async (url, opts = {}) => {
+            const headers = {...(opts.headers || {})};
+            if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+            const res = await fetch(url, {credentials: "include", ...opts, headers});
+            if (res.status === 401) {
+                location.href = "/login";
+                return null;
+            }
+            return res;
+        };
+
+        const toast = (message, type = "info") => {
+            const d = document.createElement("div");
+            const color = type === "success" ? "bg-green-600" : type === "error" ? "bg-red-600" : "bg-slate-900";
+            d.className = `fixed bottom-4 right-4 z-50 rounded-md ${color} px-4 py-2 text-sm font-medium text-white shadow-lg`;
+            d.textContent = message;
+            document.body.appendChild(d);
+            setTimeout(() => d.remove(), 2400);
+        };
+
+        const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ({
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+        }[ch]));
+
+        const fmtDate = value => value ? new Date(value).toLocaleString("zh-CN", {hour12: false}) : "-";
+        const fmtLimit = value => value ? value : "不限";
+        const shortText = (value, n = 10) => {
+            const text = String(value || "");
+            return text.length > n ? `${text.slice(0, n)}...` : text || "-";
+        };
+        const chip = (text, cls) => `<span class="inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${cls}">${esc(text)}</span>`;
+        const bindingTypeText = type => ({
+            all: "图片和视频",
+            image: "仅图片",
+            video: "仅视频",
+        }[type] || type || "图片和视频");
+        const busyText = t => {
+            const image = Number(t.image_inflight || 0);
+            const video = Number(t.video_inflight || 0);
+            const busy = image + video;
+            const cls = busy > 0 ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-700";
+            return chip(busy > 0 ? `运行中 ${busy}` : "空闲", cls);
+        };
+        const isTokenCooling = t => t.is_active && t.cooldown_until && new Date(t.cooldown_until).getTime() > Date.now();
+        const statusText = t => isTokenCooling(t) ? chip("冷却", "bg-amber-50 text-amber-700") : t.is_active ? chip("启用", "bg-green-50 text-green-700") : chip("禁用", "bg-slate-100 text-slate-600");
+        const lastStatus = t => {
+            const code = Number(t.last_status_code || 0);
+            if (!t.last_status_text && !code) return '<span class="text-xs text-muted-foreground">暂无请求</span>';
+            const cls = code === 200 ? "bg-green-50 text-green-700" : code >= 400 ? "bg-red-50 text-red-700" : "bg-blue-50 text-blue-700";
+            return `${chip(t.last_status_text || code, cls)}<div class="mt-1 text-[11px] text-muted-foreground">${esc(fmtDate(t.last_request_at))}${t.last_api_client_name ? ` · ${esc(t.last_api_client_name)}` : ""}</div>`;
+        };
+        const bindingText = t => {
+            const clients = Array.isArray(t.bound_clients) ? t.bound_clients : [];
+            if (!clients.length) return '<span class="text-xs text-muted-foreground">未分配用户</span>';
+            return clients.slice(0, 3).map(name => chip(name, "bg-indigo-50 text-indigo-700")).join(" ");
+        };
+        const usageBlock = t => {
+            const today = Number(t.today_image_count || 0) + Number(t.today_video_count || 0);
+            const total = Number(t.image_count || 0) + Number(t.video_count || 0);
+            const errors = Number(t.today_error_count || 0);
+            return `<div class="space-y-1 text-xs">
+                <div><span class="text-muted-foreground">今日</span> <span class="font-semibold">${today}</span></div>
+                <div><span class="text-muted-foreground">总计</span> <span class="font-semibold">${total}</span></div>
+                <div class="${errors ? "text-red-600" : "text-muted-foreground"}">错误 ${errors}/${Number(t.error_count || 0)}</div>
+            </div>`;
+        };
+        const loadBlock = t => {
+            const imageLimit = t.image_remaining === null || t.image_remaining === undefined ? "不限" : `剩 ${t.image_remaining}`;
+            const videoLimit = t.video_remaining === null || t.video_remaining === undefined ? "不限" : `剩 ${t.video_remaining}`;
+            return `<div class="space-y-1 text-xs">
+                <div>图 ${Number(t.image_inflight || 0)} · ${esc(imageLimit)}</div>
+                <div>视 ${Number(t.video_inflight || 0)} · ${esc(videoLimit)}</div>
+            </div>`;
+        };
+
+        const renderTokenHeader = () => {
+            const table = byId("tokenTableBody")?.closest("table");
+            const row = table?.querySelector("thead tr");
+            if (!row) return;
+            row.innerHTML = `
+                <th class="h-10 px-3 text-left align-middle font-medium text-muted-foreground">账户</th>
+                <th class="h-10 px-3 text-center align-middle font-medium text-muted-foreground">状态</th>
+                <th class="h-10 px-3 text-left align-middle font-medium text-muted-foreground">实时负载</th>
+                <th class="h-10 px-3 text-left align-middle font-medium text-muted-foreground">成功用量</th>
+                <th class="h-10 px-3 text-left align-middle font-medium text-muted-foreground">额度/等级</th>
+                <th class="h-10 px-3 text-left align-middle font-medium text-muted-foreground">绑定</th>
+                <th class="h-10 px-3 text-left align-middle font-medium text-muted-foreground">最近请求</th>
+                <th class="h-10 px-3 text-right align-middle font-medium text-muted-foreground">操作</th>`;
+        };
+
+        const renderTokenRows = tokens => {
+            renderTokenHeader();
+            const body = byId("tokenTableBody");
+            if (!body) return;
+            if (!tokens.length) {
+                body.innerHTML = '<tr><td colspan="8" class="py-10 text-center text-sm text-muted-foreground">暂无 Token</td></tr>';
+                return;
+            }
+            body.innerHTML = tokens.map(t => {
+                const tier = t.user_paygate_tier === "PAYGATE_TIER_TWO" ? "Ultra" : t.user_paygate_tier === "PAYGATE_TIER_ONE" ? "Pro" : "Free";
+                const atClass = t.at_expired ? "text-red-600" : t.at_expiring_within_1h ? "text-amber-600" : "text-muted-foreground";
+                return `<tr class="hover:bg-muted/30">
+                    <td class="px-3 py-3 align-top">
+                        <div class="font-medium text-foreground">${esc(t.email || "-")}</div>
+                        <div class="mt-1">${chip(t.token_group || "default", "bg-teal-50 text-teal-700")}</div>
+                        <div class="mt-1 text-xs text-muted-foreground">#${esc(t.id)} · ${esc(shortText(t.current_project_id, 12))}</div>
+                    </td>
+                    <td class="px-3 py-3 text-center align-top">${statusText(t)}<div class="mt-2">${busyText(t)}</div></td>
+                    <td class="px-3 py-3 align-top">${loadBlock(t)}</td>
+                    <td class="px-3 py-3 align-top">${usageBlock(t)}</td>
+                    <td class="px-3 py-3 align-top">
+                        <button onclick="refreshTokenCredits(${Number(t.id)})" class="rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 hover:bg-blue-100">${esc(t.credits ?? "-")} C</button>
+                        <div class="mt-2">${chip(tier, tier === "Ultra" ? "bg-purple-50 text-purple-700" : tier === "Pro" ? "bg-blue-50 text-blue-700" : "bg-slate-100 text-slate-700")}</div>
+                    </td>
+                    <td class="px-3 py-3 align-top">${bindingText(t)}</td>
+                    <td class="px-3 py-3 align-top">${lastStatus(t)}<div class="mt-1 text-[11px] ${atClass}">AT ${fmtDate(t.at_expires)}</div></td>
+                    <td class="px-3 py-3 text-right align-top">
+                        <div class="inline-flex flex-nowrap items-center justify-end gap-1">
+                            <button onclick="refreshTokenAT(${Number(t.id)})" class="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs font-medium hover:bg-blue-50 hover:text-blue-700">刷新AT</button>
+                            <button onclick="openEditModal(${Number(t.id)})" class="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs font-medium hover:bg-green-50 hover:text-green-700">详情</button>
+                            <button onclick="toggleToken(${Number(t.id)},${t.is_active ? "true" : "false"})" class="inline-flex h-7 items-center justify-center rounded-md px-2 text-xs font-medium hover:bg-accent">${t.is_active ? "禁用" : "启用"}</button>
+                        </div>
+                    </td>
+                </tr>`;
+            }).join("");
+        };
+
+        window.refreshTokenOps = async () => {
+            const res = await api("/api/tokens");
+            if (!res) return;
+            const tokens = await res.json();
+            renderTokenRows(tokens);
+        };
+
+        window.startTokenOpsRefresh = () => {
+            if (tokenOpsTimer) return;
+            window.refreshTokenOps();
+            tokenOpsTimer = setInterval(() => {
+                if (!byId("panelTokens")?.classList.contains("hidden")) window.refreshTokenOps();
+            }, 3000);
+        };
+
+        window.stopTokenOpsRefresh = () => {
+            if (tokenOpsTimer) clearInterval(tokenOpsTimer);
+            tokenOpsTimer = null;
+        };
+
+        const renderClients = () => {
+            const body = byId("clientsTableBody");
+            if (!body) return;
+            if (!clientsCache.length) {
+                body.innerHTML = '<tr><td colspan="6" class="py-10 text-center text-sm text-muted-foreground">暂无用户账号</td></tr>';
+                return;
+            }
+            body.innerHTML = clientsCache.map(c => {
+                const bindings = Array.isArray(c.bindings) ? c.bindings : [];
+                const bindingLabel = bindings.length ? bindings.map(b => chip(`#${b.token_id} ${b.generation_type}`, "bg-indigo-50 text-indigo-700")).join(" ") : '<span class="text-xs text-muted-foreground">未绑定 Token</span>';
+                const daily = c.daily_limit ? `${c.today_success_count || 0}/${c.daily_limit}` : `${c.today_success_count || 0}/不限`;
+                const total = c.total_limit ? `${c.success_count || 0}/${c.total_limit}` : `${c.success_count || 0}/不限`;
+                return `<tr>
+                    <td class="px-3 py-3"><div class="font-medium">${esc(c.name)}</div><div class="text-xs text-muted-foreground">${esc(c.username || "-")} · ID ${esc(c.id)}</div></td>
+                    <td class="px-3 py-3 font-mono text-xs">${esc(c.api_key || "-")}</td>
+                    <td class="px-3 py-3 text-center">${c.is_active ? chip("启用", "bg-green-50 text-green-700") : chip("禁用", "bg-slate-100 text-slate-600")}</td>
+                    <td class="px-3 py-3 text-center text-xs"><div>${esc(daily)}</div><div class="text-muted-foreground">${esc(total)}</div></td>
+                    <td class="px-3 py-3">${bindingLabel}</td>
+                    <td class="px-3 py-3 text-right">
+                        <div class="inline-flex flex-wrap items-center justify-end gap-1">
+                            <button onclick="openClientDetail(${Number(c.id)})" class="rounded-md px-2 py-1 text-xs hover:bg-green-50 hover:text-green-700">详情</button>
+                            <button onclick="bindClientTokens(${Number(c.id)})" class="rounded-md px-2 py-1 text-xs hover:bg-blue-50 hover:text-blue-700">绑定</button>
+                            <button onclick="toggleApiClient(${Number(c.id)}, ${c.is_active ? "false" : "true"})" class="rounded-md px-2 py-1 text-xs hover:bg-accent">${c.is_active ? "禁用" : "启用"}</button>
+                            <button onclick="deleteApiClient(${Number(c.id)})" class="rounded-md px-2 py-1 text-xs text-red-700 hover:bg-red-50">删除</button>
+                        </div>
+                    </td>
+                </tr>`;
+            }).join("");
+        };
+
+        const bindingMapFor = client => new Map((client.bindings || []).map(b => [Number(b.token_id), b.generation_type || "all"]));
+
+        const updateBindSummary = () => {
+            const selected = document.querySelectorAll(".client-bind-token:checked").length;
+            const summary = byId("clientBindSummary");
+            if (summary) summary.textContent = selected ? `已选择 ${selected} 个 Token` : "未选择 Token，保存后该用户暂无可用 Token 池。";
+        };
+
+        window.toggleClientBindType = (tokenId, checked) => {
+            const select = byId(`clientBindType_${tokenId}`);
+            if (!select) return;
+            select.disabled = !checked;
+            select.classList.toggle("opacity-50", !checked);
+            updateBindSummary();
+        };
+
+        const renderBindRows = (client, tokens) => {
+            const body = byId("clientBindTokenRows");
+            if (!body) return;
+            const current = bindingMapFor(client);
+            if (!tokens.length) {
+                body.innerHTML = '<tr><td colspan="4" class="py-10 text-center text-sm text-muted-foreground">暂无 Token</td></tr>';
+                updateBindSummary();
+                return;
+            }
+            body.innerHTML = tokens.map(t => {
+                const id = Number(t.id);
+                const checked = current.has(id);
+                const type = current.get(id) || "all";
+                const load = Number(t.image_inflight || 0) + Number(t.video_inflight || 0);
+                return `<tr>
+                    <td class="px-3 py-3">
+                        <label class="flex items-start gap-3">
+                            <input type="checkbox" class="client-bind-token mt-1 h-4 w-4" data-token-id="${id}" ${checked ? "checked" : ""} onchange="toggleClientBindType(${id}, this.checked)">
+                            <span>
+                                <span class="block font-medium">${esc(t.email || "-")}</span>
+                                <span class="block text-xs text-muted-foreground">${esc(t.token_group || "default")} · #${esc(id)} · ${esc(shortText(t.current_project_id, 14))}</span>
+                            </span>
+                        </label>
+                    </td>
+                    <td class="px-3 py-3 text-center">${statusText(t)}</td>
+                    <td class="px-3 py-3 text-center text-xs"><span class="${load ? "text-amber-700" : "text-muted-foreground"}">${load ? `运行中 ${load}` : "空闲"}</span></td>
+                    <td class="px-3 py-3">
+                        <select id="clientBindType_${id}" class="h-8 rounded-md border border-input bg-background px-2 text-xs ${checked ? "" : "opacity-50"}" ${checked ? "" : "disabled"}>
+                            <option value="all" ${type === "all" ? "selected" : ""}>图片和视频</option>
+                            <option value="image" ${type === "image" ? "selected" : ""}>仅图片</option>
+                            <option value="video" ${type === "video" ? "selected" : ""}>仅视频</option>
+                        </select>
+                    </td>
+                </tr>`;
+            }).join("");
+            updateBindSummary();
+        };
+
+        window.loadClients = async () => {
+            const res = await api("/api/clients");
+            if (!res) return;
+            const data = await res.json();
+            clientsCache = data.clients || [];
+            renderClients();
+        };
+
+        window.createApiClient = async () => {
+            const name = byId("clientName")?.value.trim();
+            const username = byId("clientUsername")?.value.trim();
+            const password = byId("clientPassword")?.value || "";
+            if (!name) return toast("请输入用户名称", "error");
+            if (!username) return toast("请输入登录账号", "error");
+            if (!password) return toast("请输入登录密码", "error");
+            const payload = {
+                name,
+                username,
+                password,
+                daily_limit: byId("clientDailyLimit")?.value ? Number(byId("clientDailyLimit").value) : null,
+                total_limit: byId("clientTotalLimit")?.value ? Number(byId("clientTotalLimit").value) : null,
+                is_active: true,
+            };
+            const res = await api("/api/clients", {method: "POST", body: JSON.stringify(payload)});
+            if (!res) return;
+            const data = await res.json();
+            if (!data.success) return toast(data.detail || "创建失败", "error");
+            byId("clientCreateResult").textContent = "用户已创建，API Key 和插件连接 Token 已自动生成。";
+            ["clientName", "clientUsername", "clientPassword", "clientDailyLimit", "clientTotalLimit"].forEach(id => { if (byId(id)) byId(id).value = ""; });
+            toast("用户已创建", "success");
+            await window.loadClients();
+        };
+
+        window.toggleApiClient = async (clientId, active) => {
+            const client = clientsCache.find(item => Number(item.id) === Number(clientId));
+            if (!client) return;
+            const payload = {
+                name: client.name,
+                is_active: !!active,
+                daily_limit: client.daily_limit,
+                total_limit: client.total_limit,
+            };
+            const res = await api(`/api/clients/${clientId}`, {method: "PUT", body: JSON.stringify(payload)});
+            if (!res) return;
+            if (!res.ok) return toast("更新失败", "error");
+            toast(active ? "已启用" : "已禁用", "success");
+            await window.loadClients();
+        };
+
+        const renderClientDetail = client => {
+            detailClientCache = client;
+            byId("clientDetailName").textContent = client?.name || "-";
+            byId("clientDetailId").textContent = client?.id ?? "-";
+            byId("clientDetailStatus").innerHTML = client?.is_active ? chip("启用", "bg-green-50 text-green-700") : chip("禁用", "bg-slate-100 text-slate-600");
+            byId("clientDetailToday").textContent = String(client?.today_success_count ?? 0);
+            byId("clientDetailTotal").textContent = String(client?.success_count ?? 0);
+            byId("clientDetailDailyLimit").textContent = fmtLimit(client?.daily_limit);
+            byId("clientDetailTotalLimit").textContent = fmtLimit(client?.total_limit);
+            byId("clientDetailCreated").textContent = fmtDate(client?.created_at);
+            byId("clientDetailUpdated").textContent = fmtDate(client?.updated_at);
+            byId("clientDetailApiKey").value = client?.api_key || "";
+            const bindings = Array.isArray(client?.bindings) ? client.bindings : [];
+            const rows = byId("clientDetailBindings");
+            if (rows) {
+                rows.innerHTML = bindings.length
+                    ? bindings.map(binding => `<tr>
+                        <td class="px-3 py-3 font-mono text-xs">#${esc(binding.token_id)}</td>
+                        <td class="px-3 py-3">${chip(bindingTypeText(binding.generation_type), "bg-indigo-50 text-indigo-700")}</td>
+                    </tr>`).join("")
+                    : '<tr><td colspan="2" class="py-8 text-center text-sm text-muted-foreground">未绑定 Token，暂无可用 Token 池</td></tr>';
+            }
+        };
+
+        window.openClientDetail = async clientId => {
+            const res = await api(`/api/clients/${clientId}`);
+            if (!res) return;
+            const data = await res.json();
+            if (!res.ok || !data.success) return toast(data.detail || "加载详情失败", "error");
+            renderClientDetail(data.client);
+            byId("clientDetailModal").classList.remove("hidden");
+            byId("clientDetailModal").classList.add("flex");
+        };
+
+        window.closeClientDetailModal = () => {
+            byId("clientDetailModal").classList.add("hidden");
+            byId("clientDetailModal").classList.remove("flex");
+            detailClientCache = null;
+        };
+
+        window.copyClientDetailApiKey = async () => {
+            const input = byId("clientDetailApiKey");
+            const value = input?.value || "";
+            if (!value) return;
+            try {
+                await navigator.clipboard.writeText(value);
+            } catch (_) {
+                input.focus();
+                input.select();
+                document.execCommand("copy");
+            }
+            toast("API Key 已复制", "success");
+        };
+
+        window.deleteApiClient = async clientId => {
+            const detailClient = detailClientCache && Number(detailClientCache.id) === Number(clientId) ? detailClientCache : null;
+            const client = clientsCache.find(item => Number(item.id) === Number(clientId)) || detailClient;
+            const name = client?.name || `ID ${clientId}`;
+            if (!confirm(`确定删除用户 ${name}？删除后该 API Key 将无法继续调用。`)) return;
+            const res = await api(`/api/clients/${clientId}`, {method: "DELETE"});
+            if (!res) return;
+            if (!res.ok) {
+                let message = "删除失败";
+                try {
+                    const data = await res.json();
+                    message = data.detail || message;
+                } catch (_) {}
+                return toast(message, "error");
+            }
+            if (detailClientCache && Number(detailClientCache.id) === Number(clientId)) {
+                window.closeClientDetailModal();
+            }
+            toast("用户已删除", "success");
+            await window.loadClients();
+            await window.refreshTokenOps();
+        };
+
+        window.deleteClientFromDetail = () => {
+            if (!detailClientCache?.id) return;
+            window.deleteApiClient(Number(detailClientCache.id));
+        };
+
+        window.bindClientFromDetail = () => {
+            if (!detailClientCache?.id) return;
+            const clientId = Number(detailClientCache.id);
+            window.closeClientDetailModal();
+            window.bindClientTokens(clientId);
+        };
+
+        window.bindClientTokens = async clientId => {
+            const client = clientsCache.find(item => Number(item.id) === Number(clientId));
+            if (!client) return;
+            bindingClientId = Number(clientId);
+            byId("clientBindName").textContent = `${client.name} · ${client.api_key || ""}`;
+            const res = await api("/api/tokens");
+            if (!res) return;
+            bindingTokenCache = await res.json();
+            renderBindRows(client, Array.isArray(bindingTokenCache) ? bindingTokenCache : []);
+            byId("clientBindModal").classList.remove("hidden");
+            byId("clientBindModal").classList.add("flex");
+        };
+
+        window.closeClientBindModal = () => {
+            byId("clientBindModal").classList.add("hidden");
+            byId("clientBindModal").classList.remove("flex");
+            bindingClientId = null;
+            bindingTokenCache = [];
+        };
+
+        window.saveClientBindings = async () => {
+            if (!bindingClientId) return;
+            const bindings = Array.from(document.querySelectorAll(".client-bind-token:checked")).map(input => {
+                const tokenId = Number(input.dataset.tokenId);
+                const select = byId(`clientBindType_${tokenId}`);
+                const type = ["all", "image", "video"].includes(select?.value) ? select.value : "all";
+                return {token_id: tokenId, generation_type: type};
+            });
+            const res = await api(`/api/clients/${bindingClientId}/bindings`, {method: "POST", body: JSON.stringify({bindings})});
+            if (!res) return;
+            if (!res.ok) return toast("绑定失败", "error");
+            toast("绑定已保存", "success");
+            window.closeClientBindModal();
+            await window.loadClients();
+            await window.refreshTokenOps();
+        };
+
+        window.addEventListener("DOMContentLoaded", () => {
+            window.startTokenOpsRefresh();
+        });
+    })();
     </script>
 </body>
 </html>

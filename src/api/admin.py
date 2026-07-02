@@ -17,7 +17,7 @@ from curl_cffi.requests import AsyncSession
 from ..core.auth import AuthManager
 from ..core.database import Database
 from ..core.config import config, get_yescaptcha_min_score, normalize_yescaptcha_task_type
-from ..core.models import Token
+from ..core.models import ApiClient, Token
 from ..core.browser_runtime_status import (
     fail_runtime_prepare,
     finish_runtime_prepare,
@@ -46,6 +46,7 @@ captcha_runtime_prepare_tasks: Dict[str, asyncio.Task] = {}
 
 # Store active admin session tokens (in production, use Redis or database)
 active_admin_tokens = set()
+active_user_tokens: Dict[str, int] = {}
 ADMIN_SESSION_COOKIE_NAME = "admin_session"
 SUPPORTED_API_CAPTCHA_METHODS = {"yescaptcha", "capmonster", "ezcaptcha", "capsolver"}
 
@@ -567,6 +568,7 @@ class AddTokenRequest(BaseModel):
     project_id: Optional[str] = None  # 用户可选输入project_id
     project_name: Optional[str] = None
     remark: Optional[str] = None
+    token_group: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
     image_enabled: bool = True
@@ -587,6 +589,7 @@ class UpdateTokenRequest(BaseModel):
     project_id: Optional[str] = None  # 用户可选输入project_id
     project_name: Optional[str] = None
     remark: Optional[str] = None
+    token_group: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
     image_enabled: Optional[bool] = None
@@ -651,6 +654,25 @@ class UpdateAdminConfigRequest(BaseModel):
     error_ban_threshold: int
 
 
+class ApiClientRequest(BaseModel):
+    name: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    api_key: Optional[str] = None
+    is_active: bool = True
+    daily_limit: Optional[int] = None
+    total_limit: Optional[int] = None
+
+
+class ApiClientBindingRequest(BaseModel):
+    token_id: int
+    generation_type: str = "all"
+
+
+class ApiClientBindingsRequest(BaseModel):
+    bindings: List[ApiClientBindingRequest]
+
+
 class ST2ATRequest(BaseModel):
     """ST转AT请求"""
     st: str
@@ -662,6 +684,7 @@ class ImportTokenItem(BaseModel):
     access_token: Optional[str] = None
     session_token: Optional[str] = None
     is_active: bool = True
+    token_group: Optional[str] = None
     captcha_proxy_url: Optional[str] = None
     extension_route_key: Optional[str] = None
     image_enabled: bool = True
@@ -709,6 +732,50 @@ async def verify_admin_token(request: Request, authorization: str = Header(None)
     raise HTTPException(status_code=401, detail="Missing authorization")
 
 
+def _get_session_token_from_request(request: Request, authorization: str = None) -> str:
+    if authorization and authorization.startswith("Bearer "):
+        header_token = authorization[7:].strip()
+        if header_token:
+            return header_token
+    return get_admin_token_from_cookie(request) or ""
+
+
+async def verify_console_session(request: Request, authorization: str = Header(None)) -> Dict[str, Any]:
+    """Verify either an admin or ordinary user console session."""
+    session_token = _get_session_token_from_request(request, authorization)
+    if not session_token:
+        raise HTTPException(status_code=401, detail="Missing authorization")
+
+    if session_token in active_admin_tokens:
+        return {"role": "admin", "session_token": session_token, "client_id": None, "is_admin": True}
+
+    client_id = active_user_tokens.get(session_token)
+    if client_id:
+        client = await db.get_api_client(int(client_id))
+        if client and client.is_active:
+            return {
+                "role": "user",
+                "session_token": session_token,
+                "client_id": client.id,
+                "client": client,
+                "is_admin": False,
+            }
+        active_user_tokens.pop(session_token, None)
+
+    raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+
+def _require_admin_context(context: Dict[str, Any]) -> None:
+    if not context or context.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin permission required")
+
+
+def _context_owner_client_id(context: Dict[str, Any]) -> Optional[int]:
+    if context and context.get("role") == "user":
+        return int(context["client_id"])
+    return None
+
+
 def get_admin_token_from_cookie(request: Request) -> Optional[str]:
     token = str(request.cookies.get(ADMIN_SESSION_COOKIE_NAME) or "").strip()
     return token or None
@@ -719,22 +786,53 @@ def is_admin_session_token_valid(token: Optional[str]) -> bool:
     return bool(normalized) and normalized in active_admin_tokens
 
 
+def is_console_session_token_valid(token: Optional[str]) -> bool:
+    normalized = str(token or "").strip()
+    return bool(normalized) and (
+        normalized in active_admin_tokens or normalized in active_user_tokens
+    )
+
+
 # ========== Auth Endpoints ==========
 
 @router.post("/api/admin/login")
 async def admin_login(request: LoginRequest, response: Response):
-    """Admin login - returns session token (NOT API key)"""
+    """Console login for admin or ordinary API client users."""
     admin_config = await db.get_admin_config()
 
-    if not AuthManager.verify_admin(request.username, request.password):
+    if AuthManager.verify_admin(request.username, request.password):
+        session_token = f"admin-{secrets.token_urlsafe(32)}"
+        active_admin_tokens.add(session_token)
+        response.set_cookie(
+            key=ADMIN_SESSION_COOKIE_NAME,
+            value=session_token,
+            httponly=True,
+            samesite="lax",
+            secure=False,
+            path="/",
+        )
+        return {
+            "success": True,
+            "token": session_token,
+            "username": admin_config.username if admin_config else request.username,
+            "role": "admin",
+            "client_id": None,
+        }
+
+    user_client = None
+    if hasattr(db, "get_api_client_by_username"):
+        user_client = await db.get_api_client_by_username(request.username)
+
+    if (
+        not user_client
+        or not user_client.is_active
+        or not user_client.password_hash
+        or not AuthManager.verify_password(request.password, user_client.password_hash)
+    ):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # Generate independent session token
-    session_token = f"admin-{secrets.token_urlsafe(32)}"
-
-    # Store in active tokens
-    active_admin_tokens.add(session_token)
-
+    session_token = f"user-{secrets.token_urlsafe(32)}"
+    active_user_tokens[session_token] = int(user_client.id)
     response.set_cookie(
         key=ADMIN_SESSION_COOKIE_NAME,
         value=session_token,
@@ -743,20 +841,36 @@ async def admin_login(request: LoginRequest, response: Response):
         secure=False,
         path="/",
     )
-
     return {
         "success": True,
-        "token": session_token,  # Session token (NOT API key)
-        "username": admin_config.username
+        "token": session_token,
+        "username": user_client.username or user_client.name,
+        "role": "user",
+        "client_id": user_client.id,
     }
 
 
 @router.post("/api/admin/logout")
-async def admin_logout(response: Response, token: str = Depends(verify_admin_token)):
-    """Admin logout - invalidate session token"""
-    active_admin_tokens.discard(token)
+async def admin_logout(response: Response, context: Dict[str, Any] = Depends(verify_console_session)):
+    """Console logout - invalidate current session token."""
+    session_token = context.get("session_token")
+    active_admin_tokens.discard(session_token)
+    active_user_tokens.pop(session_token, None)
     response.delete_cookie(ADMIN_SESSION_COOKIE_NAME, path="/")
     return {"success": True, "message": "退出登录成功"}
+
+@router.get("/api/session")
+async def get_console_session(context: Dict[str, Any] = Depends(verify_console_session)):
+    """Return current console session role and user identity."""
+    client = context.get("client")
+    return {
+        "success": True,
+        "role": context.get("role"),
+        "is_admin": context.get("role") == "admin",
+        "client_id": context.get("client_id"),
+        "username": getattr(client, "username", None) or getattr(client, "name", None) or "admin",
+        "name": getattr(client, "name", None) or "admin",
+    }
 
 
 @router.post("/api/admin/change-password")
@@ -790,9 +904,11 @@ async def change_password(
 # ========== Token Management ==========
 
 @router.get("/api/tokens")
-async def get_tokens(token: str = Depends(verify_admin_token)):
+async def get_tokens(context: Dict[str, Any] = Depends(verify_console_session)):
     """Get all tokens with statistics"""
-    token_rows = await db.get_all_tokens_with_stats()
+    owner_client_id = _context_owner_client_id(context)
+    is_admin = context.get("role") == "admin"
+    token_rows = await db.get_all_tokens_with_stats(owner_client_id=owner_client_id)
     to_iso = lambda value: value.isoformat() if hasattr(value, "isoformat") else value
     now = datetime.now(timezone.utc)
 
@@ -808,10 +924,36 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+    def live_fields(row):
+        token_id = row.get("id")
+        image_inflight = 0
+        video_inflight = 0
+        image_remaining = None
+        video_remaining = None
+        if concurrency_manager and token_id:
+            image_inflight = int(getattr(concurrency_manager, "_image_inflight", {}).get(token_id, 0) or 0)
+            video_inflight = int(getattr(concurrency_manager, "_video_inflight", {}).get(token_id, 0) or 0)
+            image_limit = getattr(concurrency_manager, "_image_limits", {}).get(token_id)
+            video_limit = getattr(concurrency_manager, "_video_limits", {}).get(token_id)
+            image_remaining = None if image_limit is None else max(0, int(image_limit) - image_inflight)
+            video_remaining = None if video_limit is None else max(0, int(video_limit) - video_inflight)
+        return {
+            "image_inflight": image_inflight,
+            "video_inflight": video_inflight,
+            "image_remaining": image_remaining,
+            "video_remaining": video_remaining,
+            "bound_clients": row.get("bound_clients") or [],
+            "last_status_text": row.get("last_status_text") or "",
+            "last_status_code": row.get("last_status_code"),
+            "last_duration": row.get("last_duration"),
+            "last_request_at": to_iso(row.get("last_request_at")) if row.get("last_request_at") else None,
+            "last_api_client_name": row.get("last_api_client_name") or "",
+        }
+
     return [{
         "id": row.get("id"),
-        "st": row.get("st"),  # Session Token for editing
-        "at": row.get("at"),  # Access Token for editing (从ST转换而来)
+        "st": row.get("st") if is_admin else "",  # Session Token for editing
+        "at": row.get("at") if is_admin else "",  # Access Token for editing (从ST转换而来)
         "at_expires": to_iso(row.get("at_expires")) if row.get("at_expires") else None,  # 🆕 AT过期时间
         "at_expired": bool(normalize_dt(row.get("at_expires")) and normalize_dt(row.get("at_expires")) <= now),
         "at_expiring_within_1h": bool(
@@ -819,10 +961,11 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
             and normalize_dt(row.get("at_expires")) > now
             and (normalize_dt(row.get("at_expires")) - now).total_seconds() < 3600
         ),
-        "token": row.get("at"),  # 兼容前端 token.token 的访问方式
+        "token": row.get("at") if is_admin else "",  # 兼容前端 token.token 的访问方式
         "email": row.get("email"),
         "name": row.get("name"),
         "remark": row.get("remark"),
+        "token_group": row.get("token_group") or "default",
         "is_active": bool(row.get("is_active")),
         "created_at": to_iso(row.get("created_at")) if row.get("created_at") else None,
         "last_used_at": to_iso(row.get("last_used_at")) if row.get("last_used_at") else None,
@@ -834,9 +977,9 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "captcha_proxy_url": row.get("captcha_proxy_url") or "",
         "extension_route_key": row.get("extension_route_key") or "",
         "protocol_mode": row.get("protocol_mode") or "session",
-        "google_cookies": row.get("google_cookies") or "",
+        "google_cookies": row.get("google_cookies") if is_admin else "",
         "login_account": row.get("login_account") or "",
-        "login_password": row.get("login_password") or "",
+        "login_password": row.get("login_password") if is_admin else "",
         "proxy_url": row.get("proxy_url") or "",
         "auto_refresh_enabled": bool(row.get("auto_refresh_enabled", True)),
         "refresh_interval_minutes": row.get("refresh_interval_minutes") or 120,
@@ -848,12 +991,16 @@ async def get_tokens(token: str = Depends(verify_admin_token)):
         "video_concurrency": row.get("video_concurrency"),
         "image_count": row.get("image_count", 0),
         "video_count": row.get("video_count", 0),
+        "today_image_count": row.get("today_image_count", 0),
+        "today_video_count": row.get("today_video_count", 0),
         "error_count": row.get("error_count", 0),
         "today_error_count": row.get("today_error_count", 0),
         "consecutive_error_count": row.get("consecutive_error_count", 0),
         "last_error_at": to_iso(row.get("last_error_at")) if row.get("last_error_at") else None,
+        **live_fields(row),
         "ban_reason": row.get("ban_reason"),
         "banned_at": to_iso(row.get("banned_at")) if row.get("banned_at") else None,
+        "cooldown_until": to_iso(row.get("cooldown_until")) if row.get("cooldown_until") else None,
     } for row in token_rows]  # 直接返回数组,兼容前端
 
 
@@ -869,6 +1016,7 @@ async def add_token(
             project_id=request.project_id,  # 🆕 支持用户指定project_id
             project_name=request.project_name,
             remark=request.remark,
+            token_group=request.token_group,
             captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
             extension_route_key=request.extension_route_key.strip() if request.extension_route_key is not None else None,
             image_enabled=request.image_enabled,
@@ -900,7 +1048,8 @@ async def add_token(
                 "email": new_token.email,
                 "credits": new_token.credits,
                 "project_id": new_token.current_project_id,
-                "project_name": new_token.current_project_name
+                "project_name": new_token.current_project_name,
+                "token_group": new_token.token_group
             }
         }
     except ValueError as e:
@@ -940,6 +1089,7 @@ async def update_token(
             project_id=request.project_id,
             project_name=request.project_name,
             remark=request.remark,
+            token_group=request.token_group,
             captcha_proxy_url=request.captcha_proxy_url.strip() if request.captcha_proxy_url is not None else None,
             extension_route_key=request.extension_route_key.strip() if request.extension_route_key is not None else None,
             image_enabled=request.image_enabled,
@@ -1061,11 +1211,19 @@ async def refresh_at(
             }
         else:
             debug_logger.log_error(f"[API] AT 刷新失败: token_id={token_id}")
-            
+
             error_detail = "AT刷新失败"
+            failed_token = await token_manager.get_token(token_id)
+            refresh_result = (
+                failed_token.last_st_refresh_result
+                if failed_token and failed_token.last_st_refresh_result
+                else ""
+            )
+            if refresh_result:
+                error_detail += f": {refresh_result}"
             if config.captcha_method != "personal":
                 error_detail += f"（当前打码模式: {config.captcha_method}，ST自动刷新仅在 personal 模式下可用）"
-            
+
             raise HTTPException(status_code=500, detail=error_detail)
     except HTTPException:
         raise
@@ -1151,6 +1309,7 @@ async def import_tokens(
                         st=st,
                         at=at,
                         at_expires=at_expires,
+                        token_group=item.token_group,
                         captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
                         extension_route_key=item.extension_route_key.strip() if item.extension_route_key is not None else None,
                         image_enabled=item.image_enabled,
@@ -1172,6 +1331,7 @@ async def import_tokens(
                     existing.st = st
                     existing.at = at
                     existing.at_expires = at_expires
+                    existing.token_group = item.token_group or existing.token_group
                     existing.captcha_proxy_url = item.captcha_proxy_url
                     existing.extension_route_key = item.extension_route_key
                     existing.image_enabled = item.image_enabled
@@ -1190,6 +1350,7 @@ async def import_tokens(
                     # 添加新Token
                     new_token = await token_manager.add_token(
                         st=st,
+                        token_group=item.token_group,
                         captcha_proxy_url=item.captcha_proxy_url.strip() if item.captcha_proxy_url is not None else None,
                         extension_route_key=item.extension_route_key.strip() if item.extension_route_key is not None else None,
                         image_enabled=item.image_enabled,
@@ -1452,9 +1613,9 @@ async def login(request: LoginRequest, response: Response):
 
 
 @router.post("/api/logout")
-async def logout(response: Response, token: str = Depends(verify_admin_token)):
+async def logout(response: Response, context: Dict[str, Any] = Depends(verify_console_session)):
     """Logout endpoint (alias for /api/admin/logout)"""
-    return await admin_logout(response, token)
+    return await admin_logout(response, context)
 
 
 @router.get("/health")
@@ -1467,19 +1628,223 @@ async def health_check():
 
 
 @router.get("/api/stats")
-async def get_stats(token: str = Depends(verify_admin_token)):
+async def get_stats(context: Dict[str, Any] = Depends(verify_console_session)):
     """Get statistics for dashboard"""
-    return await db.get_dashboard_stats()
+    return await db.get_dashboard_stats(owner_client_id=_context_owner_client_id(context))
+
+
+def _generate_client_api_key() -> str:
+    return f"flow2api_{secrets.token_urlsafe(24)}"
+
+
+def _generate_client_plugin_token() -> str:
+    return f"plugin_{secrets.token_urlsafe(24)}"
+
+
+def _mask_api_client_key(api_key: Optional[str]) -> str:
+    if not api_key:
+        return ""
+    if len(api_key) <= 8:
+        return f"{api_key[:2]}...{api_key[-2:]}" if len(api_key) > 4 else "****"
+    return f"{api_key[:4]}...{api_key[-4:]}"
+
+
+def _serialize_api_client(row: Dict[str, Any], include_full_key: bool = False) -> Dict[str, Any]:
+    raw_key = row.get("api_key") or ""
+    raw_plugin_token = row.get("plugin_connection_token") or ""
+    return {
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "username": row.get("username") or "",
+        "role": row.get("role") or "user",
+        "api_key": raw_key if include_full_key else _mask_api_client_key(raw_key),
+        "plugin_connection_token": raw_plugin_token if include_full_key else _mask_api_client_key(raw_plugin_token),
+        "is_active": bool(row.get("is_active")),
+        "daily_limit": row.get("daily_limit"),
+        "total_limit": row.get("total_limit"),
+        "success_count": int(row.get("success_count") or 0),
+        "today_success_count": int(row.get("today_success_count") or 0),
+        "today_date": row.get("today_date"),
+        "last_used_at": row.get("last_used_at"),
+        "binding_count": int(row.get("binding_count") or 0),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+async def _serialize_api_client_with_bindings(
+    row: Dict[str, Any],
+    include_full_key: bool = False,
+) -> Dict[str, Any]:
+    item = _serialize_api_client(row, include_full_key=include_full_key)
+    bindings = await db.get_api_client_token_bindings(int(row["id"]))
+    item["bindings"] = [
+        {
+            "id": binding.id,
+            "token_id": binding.token_id,
+            "generation_type": binding.generation_type,
+        }
+        for binding in bindings
+    ]
+    item["binding_count"] = len(bindings)
+    return item
+
+
+@router.get("/api/clients")
+async def list_api_clients(token: str = Depends(verify_admin_token)):
+    """List per-user API clients."""
+    rows = await db.list_api_clients()
+    clients = [
+        await _serialize_api_client_with_bindings(row)
+        for row in rows
+    ]
+    return {"success": True, "clients": clients}
+
+
+@router.get("/api/clients/{client_id}")
+async def get_api_client_detail(
+    client_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    """Get one per-user API client with the full API key."""
+    client = await db.get_api_client(client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="API client not found")
+
+    return {
+        "success": True,
+        "client": await _serialize_api_client_with_bindings(
+            client.model_dump(),
+            include_full_key=True,
+        ),
+    }
+
+
+@router.post("/api/clients")
+async def create_api_client(
+    request: ApiClientRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Create a per-user API client."""
+    name = (request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Client name is required")
+    username = (request.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not request.password:
+        raise HTTPException(status_code=400, detail="Password is required")
+    password_hash = AuthManager.hash_password(request.password) if request.password else ""
+    api_key = (request.api_key or "").strip() or _generate_client_api_key()
+    plugin_connection_token = _generate_client_plugin_token()
+
+    try:
+        client_id = await db.add_api_client(
+            ApiClient(
+                name=name,
+                username=username or None,
+                password_hash=password_hash,
+                api_key=api_key,
+                plugin_connection_token=plugin_connection_token,
+                is_active=bool(request.is_active),
+                daily_limit=request.daily_limit,
+                total_limit=request.total_limit,
+            )
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to create API client: {exc}")
+
+    client = await db.get_api_client(client_id)
+    return {
+        "success": True,
+        "client": _serialize_api_client(client.model_dump(), include_full_key=True),
+    }
+
+
+@router.put("/api/clients/{client_id}")
+async def update_api_client(
+    client_id: int,
+    request: ApiClientRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Update a per-user API client."""
+    existing = await db.get_api_client(client_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="API client not found")
+
+    name = (request.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Client name is required")
+
+    update_fields = {
+        "name": name,
+        "is_active": bool(request.is_active),
+        "daily_limit": request.daily_limit,
+        "total_limit": request.total_limit,
+    }
+    if request.username is not None:
+        update_fields["username"] = (request.username or "").strip() or None
+    if request.password:
+        update_fields["password_hash"] = AuthManager.hash_password(request.password)
+    if request.api_key is not None and request.api_key.strip():
+        update_fields["api_key"] = request.api_key.strip()
+
+    await db.update_api_client(client_id, **update_fields)
+    updated = await db.get_api_client(client_id)
+    return {
+        "success": True,
+        "client": _serialize_api_client(updated.model_dump()),
+    }
+
+
+@router.delete("/api/clients/{client_id}")
+async def delete_api_client(
+    client_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    """Delete a per-user API client."""
+    deleted = await db.delete_api_client(client_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="API client not found")
+    return {"success": True}
+
+
+@router.post("/api/clients/{client_id}/bindings")
+async def save_api_client_bindings(
+    client_id: int,
+    request: ApiClientBindingsRequest,
+    token: str = Depends(verify_admin_token),
+):
+    """Replace Token bindings for one API client."""
+    existing = await db.get_api_client(client_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="API client not found")
+
+    await db.set_api_client_token_bindings(
+        client_id,
+        [
+            {
+                "token_id": binding.token_id,
+                "generation_type": binding.generation_type,
+            }
+            for binding in request.bindings
+        ],
+    )
+    return {"success": True}
 
 
 @router.get("/api/logs")
 async def get_logs(
     limit: int = 100,
-    token: str = Depends(verify_admin_token)
+    context: Dict[str, Any] = Depends(verify_console_session),
 ):
     """Get lightweight request logs for list view"""
     limit = max(1, min(limit, 100))
-    logs = await db.get_logs(limit=limit, include_payload=False)
+    logs = await db.get_logs(
+        limit=limit,
+        include_payload=False,
+        owner_client_id=_context_owner_client_id(context),
+    )
 
     result = []
     for log in logs:
@@ -1491,6 +1856,8 @@ async def get_logs(
         result.append({
             "id": log.get("id"),
             "token_id": log.get("token_id"),
+            "api_client_id": log.get("api_client_id"),
+            "api_client_name": log.get("api_client_name"),
             "token_email": log.get("token_email"),
             "token_username": log.get("token_username"),
             "operation": log.get("operation"),
@@ -1508,10 +1875,13 @@ async def get_logs(
 @router.get("/api/logs/{log_id}")
 async def get_log_detail(
     log_id: int,
-    token: str = Depends(verify_admin_token)
+    context: Dict[str, Any] = Depends(verify_console_session),
 ):
     """Get single request log detail (payload loaded on demand)"""
-    log = await db.get_log_detail(log_id)
+    log = await db.get_log_detail(
+        log_id,
+        owner_client_id=_context_owner_client_id(context),
+    )
     if not log:
         raise HTTPException(status_code=404, detail="日志不存在")
 
@@ -1520,6 +1890,8 @@ async def get_log_detail(
     return {
         "id": log.get("id"),
         "token_id": log.get("token_id"),
+        "api_client_id": log.get("api_client_id"),
+        "api_client_name": log.get("api_client_name"),
         "token_email": log.get("token_email"),
         "token_username": log.get("token_username"),
         "operation": log.get("operation"),
@@ -1546,15 +1918,28 @@ async def clear_logs(token: str = Depends(verify_admin_token)):
 
 
 @router.get("/api/admin/config")
-async def get_admin_config(token: str = Depends(verify_admin_token)):
+async def get_admin_config(context: Dict[str, Any] = Depends(verify_console_session)):
     """Get admin configuration"""
+    if context.get("role") == "user":
+        client = context.get("client")
+        return {
+            "admin_username": getattr(client, "username", None) or getattr(client, "name", ""),
+            "api_key": getattr(client, "api_key", ""),
+            "error_ban_threshold": None,
+            "debug_enabled": False,
+            "role": "user",
+            "client_id": context.get("client_id"),
+        }
+
     admin_config = await db.get_admin_config()
 
     return {
         "admin_username": admin_config.username,
         "api_key": admin_config.api_key,
         "error_ban_threshold": admin_config.error_ban_threshold,
-        "debug_enabled": config.debug_enabled  # Return actual debug status
+        "debug_enabled": config.debug_enabled,  # Return actual debug status
+        "role": "admin",
+        "client_id": None,
     }
 
 
@@ -2268,7 +2653,7 @@ async def test_captcha_score(
 
 # ========== Plugin Configuration Endpoints ==========
 
-async def _verify_plugin_connection_token(authorization: Optional[str]) -> None:
+async def _verify_plugin_connection_token(authorization: Optional[str]) -> Dict[str, Any]:
     plugin_config = await db.get_plugin_config()
     provided_token = None
     if authorization:
@@ -2276,23 +2661,38 @@ async def _verify_plugin_connection_token(authorization: Optional[str]) -> None:
             provided_token = authorization[7:]
         else:
             provided_token = authorization
-    if not plugin_config.connection_token or provided_token != plugin_config.connection_token:
-        raise HTTPException(status_code=401, detail="Invalid connection token")
+    provided_token = (provided_token or "").strip()
+    if plugin_config.connection_token and provided_token == plugin_config.connection_token:
+        return {"role": "admin", "client_id": None, "client": None}
+
+    client = None
+    if hasattr(db, "get_api_client_by_plugin_token"):
+        client = await db.get_api_client_by_plugin_token(provided_token)
+    if client and client.is_active:
+        return {"role": "user", "client_id": client.id, "client": client}
+
+    raise HTTPException(status_code=401, detail="Invalid connection token")
 
 
 @router.get("/api/plugin/config")
-async def get_plugin_config(request: Request, token: str = Depends(verify_admin_token)):
+async def get_plugin_config(
+    request: Request,
+    context: Dict[str, Any] = Depends(verify_console_session),
+    token: Optional[str] = None,
+):
     """Get plugin configuration"""
-    plugin_config = await db.get_plugin_config()
-
+    if not isinstance(context, dict):
+        context = {"role": "admin", "client_id": None, "client": None}
     # Get the actual domain and port from the request
     # This allows the connection URL to reflect the user's actual access path
     host_header = request.headers.get("host", "")
+    forwarded_proto = (request.headers.get("x-forwarded-proto", "") or "").split(",", 1)[0].strip()
+    scheme = forwarded_proto if forwarded_proto in {"http", "https"} else "http"
 
     # Generate connection URL based on actual request
     if host_header:
         # Use the actual domain/IP and port from the request
-        connection_url = f"http://{host_header}/api/plugin/update-token"
+        connection_url = f"{scheme}://{host_header}/api/plugin/update-token"
     else:
         # Fallback to config-based URL
         from ..core.config import config
@@ -2304,6 +2704,24 @@ async def get_plugin_config(request: Request, token: str = Depends(verify_admin_
         else:
             connection_url = f"http://{server_host}:{server_port}/api/plugin/update-token"
 
+    if context.get("role") == "user":
+        client = context.get("client")
+        connection_token = getattr(client, "plugin_connection_token", None)
+        if not connection_token:
+            connection_token = _generate_client_plugin_token()
+            await db.update_api_client(int(context["client_id"]), plugin_connection_token=connection_token)
+        return {
+            "success": True,
+            "config": {
+                "connection_token": connection_token,
+                "connection_url": connection_url,
+                "auto_enable_on_update": True,
+                "api_key": getattr(client, "api_key", ""),
+                "read_only": True,
+            }
+        }
+
+    plugin_config = await db.get_plugin_config()
     return {
         "success": True,
         "config": {
@@ -2343,8 +2761,9 @@ async def update_plugin_config(
 @router.post("/api/plugin/update-token")
 async def plugin_update_token(request: dict, authorization: Optional[str] = Header(None)):
     """Receive token update from Chrome extension (no admin auth required, uses connection_token)"""
-    await _verify_plugin_connection_token(authorization)
+    plugin_context = await _verify_plugin_connection_token(authorization)
     plugin_config = await db.get_plugin_config()
+    owner_client_id = plugin_context.get("client_id") if plugin_context.get("role") == "user" else None
 
     # Extract session token from request
     session_token = request.get("session_token")
@@ -2387,6 +2806,16 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 st=session_token,
                 at=at,
                 at_expires=at_expires,
+                project_id=request.get("project_id"),
+                project_name=request.get("project_name"),
+                remark=request.get("remark"),
+                token_group=request.get("token_group"),
+                captcha_proxy_url=request.get("captcha_proxy_url"),
+                extension_route_key=request.get("extension_route_key"),
+                image_enabled=request.get("image_enabled"),
+                video_enabled=request.get("video_enabled"),
+                image_concurrency=request.get("image_concurrency"),
+                video_concurrency=request.get("video_concurrency"),
                 protocol_mode=request.get("protocol_mode"),
                 google_cookies=request.get("google_cookies"),
                 login_account=request.get("login_account"),
@@ -2394,7 +2823,10 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 proxy_url=request.get("proxy_url"),
                 auto_refresh_enabled=request.get("auto_refresh_enabled"),
                 refresh_interval_minutes=request.get("refresh_interval_minutes"),
+                owner_client_id=owner_client_id,
             )
+            if owner_client_id and hasattr(db, "add_api_client_token_binding"):
+                await db.add_api_client_token_binding(int(owner_client_id), int(existing_token.id), "all")
 
             # Check if auto-enable is enabled and token is disabled
             if plugin_config.auto_enable_on_update and not existing_token.is_active:
@@ -2418,7 +2850,16 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
         try:
             new_token = await token_manager.add_token(
                 st=session_token,
-                remark="Added by Chrome Extension",
+                project_id=request.get("project_id"),
+                project_name=request.get("project_name"),
+                remark=request.get("remark") or "Added by Chrome Extension",
+                token_group=request.get("token_group"),
+                captcha_proxy_url=request.get("captcha_proxy_url"),
+                extension_route_key=request.get("extension_route_key"),
+                image_enabled=request.get("image_enabled", True),
+                video_enabled=request.get("video_enabled", True),
+                image_concurrency=request.get("image_concurrency", -1),
+                video_concurrency=request.get("video_concurrency", -1),
                 protocol_mode=request.get("protocol_mode", "session"),
                 google_cookies=request.get("google_cookies"),
                 login_account=request.get("login_account"),
@@ -2426,7 +2867,10 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
                 proxy_url=request.get("proxy_url"),
                 auto_refresh_enabled=request.get("auto_refresh_enabled", True),
                 refresh_interval_minutes=request.get("refresh_interval_minutes", 120),
+                owner_client_id=owner_client_id,
             )
+            if owner_client_id and hasattr(db, "add_api_client_token_binding"):
+                await db.add_api_client_token_binding(int(owner_client_id), int(new_token.id), "all")
 
             return {
                 "success": True,
@@ -2441,7 +2885,7 @@ async def plugin_update_token(request: dict, authorization: Optional[str] = Head
 @router.post("/api/plugin/check-tokens")
 async def plugin_check_tokens(request: Optional[dict] = None, authorization: Optional[str] = Header(None)):
     """Return token status for external syncers using the plugin connection token."""
-    await _verify_plugin_connection_token(authorization)
+    plugin_context = await _verify_plugin_connection_token(authorization)
 
     request = request or {}
     requested_emails = request.get("emails") if isinstance(request, dict) else None
@@ -2453,7 +2897,9 @@ async def plugin_check_tokens(request: Optional[dict] = None, authorization: Opt
             if str(email or "").strip()
         }
 
-    rows = await db.get_all_tokens_with_stats()
+    rows = await db.get_all_tokens_with_stats(
+        owner_client_id=plugin_context.get("client_id") if plugin_context.get("role") == "user" else None
+    )
     tokens = []
     for row in rows:
         email = str(row.get("email") or "").strip()

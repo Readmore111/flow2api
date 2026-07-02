@@ -12,7 +12,7 @@
       color: #111827;
     }
     .wrap {
-      max-width: 720px;
+      max-width: 760px;
       margin: 0 auto;
       padding: 24px;
     }
@@ -46,6 +46,7 @@
     }
     button {
       margin-top: 18px;
+      margin-right: 8px;
       border: 0;
       border-radius: 10px;
       background: #111827;
@@ -54,16 +55,21 @@
       font-size: 14px;
       cursor: pointer;
     }
+    button.secondary {
+      background: #2563eb;
+    }
     .hint {
       margin-top: 12px;
       font-size: 13px;
       color: #6b7280;
+      line-height: 1.5;
     }
     .status {
       margin-top: 12px;
       min-height: 20px;
       font-size: 13px;
       color: #065f46;
+      line-height: 1.5;
     }
     code {
       background: #f3f4f6;
@@ -76,25 +82,37 @@
   <div class="wrap">
     <div class="panel">
       <h1>Flow2API Captcha Worker</h1>
-      <p>给当前浏览器实例设置一个独立的路由键，Flow2API 后端就能把对应账号的验证码请求固定发到这个实例。</p>
+      <p>为当前 Chrome 实例设置独立路由。扩展可以给 Flow2API 提供验证码，也可以把当前已登录的 Google Flow 账号导入账号池，并同步 Google Cookies 用于协议自动刷新。</p>
 
       <label for="routeKey">Route Key</label>
-      <input id="routeKey" type="text" placeholder="例如 9223">
+      <input id="routeKey" type="text" placeholder="例如 account-02">
 
       <label for="clientLabel">Client Label</label>
-      <input id="clientLabel" type="text" placeholder="例如 browser-9223">
+      <input id="clientLabel" type="text" placeholder="例如 chrome-account-02">
 
       <label for="serverUrl">WebSocket URL</label>
-      <input id="serverUrl" type="text" placeholder="ws://127.0.0.1:8000/captcha_ws">
+      <input id="serverUrl" type="text" placeholder="wss://niktokfurniture.com/captcha_ws">
 
       <label for="apiKey">Flow2API API Key</label>
-      <input id="apiKey" type="password" placeholder="管理后台里的 API Key">
+      <input id="apiKey" type="password" placeholder="后台里的 API Key">
+
+      <label for="connectionUrl">Account Import URL</label>
+      <input id="connectionUrl" type="text" placeholder="https://niktokfurniture.com/api/plugin/update-token">
+
+      <label for="connectionToken">Account Import Token</label>
+      <input id="connectionToken" type="password" placeholder="后台插件连接 Token">
 
       <button id="saveBtn" type="button">保存</button>
+      <button id="importBtn" type="button" class="secondary">导入当前 Flow 账号</button>
       <div class="status" id="status"></div>
-      <div class="hint">管理台 token 里填写同样的 <code>Route Key</code>，比如 9223 对 9223。后端会使用 API Key 校验 WebSocket 连接。</div>
+      <div class="hint">
+        打码模式使用 <code>WebSocket URL</code> 和 <code>API Key</code>。
+        账号导入使用 <code>Account Import URL</code> 和 <code>Account Import Token</code>。
+      </div>
+      <div class="hint">导入账号前，请先在任意 Chrome 标签页打开已登录的 Google Flow 项目页面，并确认同一 Chrome 已登录 <code>accounts.google.com</code>。扩展会自动读取必要的 Google Cookies；如果没读到，会按仅 ST 模式导入。</div>
     </div>
   </div>
+  <script src="import_helpers.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

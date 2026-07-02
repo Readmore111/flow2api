@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import json
+import re
 import time
 from pathlib import Path
 from typing import Optional, AsyncGenerator, List, Dict, Any
@@ -1106,6 +1107,65 @@ class GenerationHandler:
         )
         return token_obj is not None
 
+    async def _wait_for_generation_slot(
+        self,
+        generation_type: str,
+        token,
+        perf_trace: Dict[str, Any],
+    ) -> tuple[bool, int]:
+        """Acquire the per-token hard concurrency slot for this request."""
+        if not self.concurrency_manager or not token or not getattr(token, "id", None):
+            return True, 0
+
+        token_id = int(token.id)
+        if generation_type == "image":
+            trace = perf_trace.setdefault("image_generation", {})
+            ok, waited_ms = await self.concurrency_manager.wait_acquire_image(
+                token_id,
+                config.flow_image_slot_wait_timeout,
+            )
+            trace["slot_wait_ms"] = waited_ms
+            trace["slot_acquired"] = bool(ok)
+            trace["slot_limit"] = token.image_concurrency
+            return ok, waited_ms
+
+        if generation_type == "video":
+            trace = perf_trace.setdefault("video_generation", {})
+            ok, waited_ms = await self.concurrency_manager.wait_acquire_video(
+                token_id,
+                config.flow_video_slot_wait_timeout,
+            )
+            trace["slot_wait_ms"] = waited_ms
+            trace["slot_acquired"] = bool(ok)
+            trace["slot_limit"] = token.video_concurrency
+            return ok, waited_ms
+
+        return True, 0
+
+    async def _release_generation_slot(self, generation_type: str, token_id: Optional[int]):
+        """Release the per-token hard concurrency slot for this request."""
+        if not self.concurrency_manager or not token_id:
+            return
+        if generation_type == "image":
+            await self.concurrency_manager.release_image(int(token_id))
+        elif generation_type == "video":
+            await self.concurrency_manager.release_video(int(token_id))
+
+    def _get_concurrency_timeout_error_message(
+        self,
+        generation_type: str,
+        token,
+        waited_ms: int,
+    ) -> str:
+        media_name = "图片" if generation_type == "image" else "视频"
+        limit = token.image_concurrency if generation_type == "image" else token.video_concurrency
+        waited_seconds = max(0.0, float(waited_ms or 0) / 1000.0)
+        return (
+            f"Token {token.id} ({token.email}) 的{media_name}并发已满，"
+            f"已等待 {waited_seconds:.1f} 秒仍无可用槽位。"
+            f"当前并发上限: {limit}。请稍后重试，或增加账号池/提高该 Token 并发上限。"
+        )
+
     async def handle_generation(
         self,
         model: str,
@@ -1114,6 +1174,8 @@ class GenerationHandler:
         stream: bool = False,
         base_url_override: Optional[str] = None,
         video_media_id: Optional[str] = None,
+        api_client: Optional[Dict[str, Any]] = None,
+        requested_token_id: Optional[int] = None,
     ) -> AsyncGenerator:
         """统一生成入口
 
@@ -1137,6 +1199,11 @@ class GenerationHandler:
         response_state = self._create_response_state()
         response_state["base_url"] = (base_url_override or "").strip().rstrip("/") or None
         request_log_state: Dict[str, Any] = {"id": None, "progress": 0}
+        slot_state: Dict[str, Any] = {
+            "acquired": False,
+            "generation_type": None,
+            "token_id": None,
+        }
 
         # 防止并发链路复用到上一次请求的指纹上下文
         if hasattr(self.flow_client, "clear_request_fingerprint"):
@@ -1159,6 +1226,9 @@ class GenerationHandler:
             "model": model,
             "prompt": prompt_for_log,
             "has_images": images is not None and len(images) > 0,
+            "api_client_id": (api_client or {}).get("id"),
+            "api_client_name": (api_client or {}).get("name"),
+            "requested_token_id": requested_token_id,
         }
         debug_logger.log_info(f"[GENERATION] 开始生成 - 模型: {model}, 类型: {generation_type}, Prompt: {prompt[:50]}...")
 
@@ -1187,6 +1257,8 @@ class GenerationHandler:
             token = await self.load_balancer.select_token(
                 for_image_generation=True,
                 model=model,
+                api_client=api_client,
+                requested_token_id=requested_token_id,
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
@@ -1195,6 +1267,8 @@ class GenerationHandler:
             token = await self.load_balancer.select_token(
                 for_video_generation=True,
                 model=model,
+                api_client=api_client,
+                requested_token_id=requested_token_id,
                 reserve=False,
                 enforce_concurrency_filter=False,
                 track_pending=True,
@@ -1208,6 +1282,8 @@ class GenerationHandler:
                     for_image_generation=(generation_type == "image"),
                     for_video_generation=(generation_type == "video"),
                     model=model,
+                    api_client=api_client,
+                    requested_token_id=requested_token_id,
                 )
             if not error_msg:
                 error_msg = self._get_no_token_error_message(generation_type)
@@ -1226,7 +1302,14 @@ class GenerationHandler:
             )
             if stream:
                 yield self._create_stream_chunk(f"错误: {error_msg}\n")
-            yield self._create_error_response(error_msg, status_code=503)
+            no_token_code = self._classify_no_token_error_code(error_msg)
+            yield self._create_error_response(
+                error_msg,
+                status_code=503,
+                code=no_token_code,
+                retryable=True,
+                status_text=no_token_code,
+            )
             return
 
         debug_logger.log_info(f"[GENERATION] 已选择Token: {token.id} ({token.email})")
@@ -1240,6 +1323,62 @@ class GenerationHandler:
         )
 
         try:
+            await self._update_request_log_progress(
+                request_log_state,
+                token_id=token.id,
+                status_text=f"waiting_{generation_type}_slot",
+                progress=10,
+            )
+            if stream:
+                media_name = "视频" if generation_type == "video" else "图片"
+                yield self._create_stream_chunk(f"正在等待Token {media_name}并发槽位...\n")
+
+            slot_started_at = time.time()
+            slot_ok, slot_wait_ms = await self._wait_for_generation_slot(
+                generation_type,
+                token,
+                perf_trace,
+            )
+            perf_trace["slot_acquire_ms"] = int((time.time() - slot_started_at) * 1000)
+            if slot_ok:
+                slot_state["acquired"] = bool(self.concurrency_manager and token and token.id)
+                slot_state["generation_type"] = generation_type
+                slot_state["token_id"] = token.id
+
+            if not slot_ok:
+                error_msg = self._get_concurrency_timeout_error_message(
+                    generation_type,
+                    token,
+                    slot_wait_ms,
+                )
+                debug_logger.log_warning(f"[GENERATION] {error_msg}")
+                duration = time.time() - start_time
+                record_generation_result(generation_type, "busy", duration)
+                perf_trace["status"] = "failed"
+                perf_trace["total_ms"] = int(duration * 1000)
+                perf_trace["error"] = error_msg
+                await self._log_request(
+                    token.id,
+                    request_operation,
+                    request_payload,
+                    {"error": error_msg, "performance": perf_trace},
+                    429,
+                    duration,
+                    log_id=request_log_state.get("id"),
+                    status_text="concurrency_full",
+                    progress=request_log_state.get("progress", 0),
+                )
+                if stream:
+                    yield self._create_stream_chunk(f"错误: {error_msg}\n")
+                yield self._create_error_response(
+                    error_msg,
+                    status_code=429,
+                    code="concurrency_full",
+                    retryable=True,
+                    status_text="concurrency_full",
+                )
+                return
+
             # 3. 确保AT有效
             debug_logger.log_info(f"[GENERATION] 检查Token AT有效性...")
             if stream:
@@ -1260,7 +1399,13 @@ class GenerationHandler:
                 record_generation_result(generation_type, "failed", time.time() - start_time)
                 if stream:
                     yield self._create_stream_chunk(f"错误: {error_msg}\n")
-                yield self._create_error_response(error_msg, status_code=503)
+                yield self._create_error_response(
+                    error_msg,
+                    status_code=503,
+                    code="token_at_invalid",
+                    retryable=True,
+                    status_text="token_at_invalid",
+                )
                 return
 
             # 4. 确保Project存在
@@ -1273,7 +1418,13 @@ class GenerationHandler:
                 record_generation_result(generation_type, "failed", time.time() - start_time)
                 if stream:
                     yield self._create_stream_chunk(f"错误: {error_msg}\n")
-                yield self._create_error_response(error_msg, status_code=403)
+                yield self._create_error_response(
+                    error_msg,
+                    status_code=403,
+                    code="account_tier_unsupported",
+                    retryable=False,
+                    status_text="account_tier_unsupported",
+                )
                 return
 
             ensure_project_started_at = time.time()
@@ -1352,6 +1503,8 @@ class GenerationHandler:
 
             is_video = (generation_type == "video")
             await self.token_manager.record_usage(token.id, is_video=is_video)
+            if api_client and api_client.get("id"):
+                await self.db.increment_api_client_success(int(api_client["id"]))
 
             # 重置错误计数 (请求成功时清空连续错误计数)
             await self.token_manager.record_success(token.id)
@@ -1459,6 +1612,13 @@ class GenerationHandler:
                 yield self._create_stream_chunk(f"错误: {error_msg}\n")
             yield self._create_error_response(error_msg, status_code=500)
         finally:
+            if slot_state.get("acquired"):
+                await self._release_generation_slot(
+                    str(slot_state.get("generation_type") or ""),
+                    slot_state.get("token_id"),
+                )
+                slot_state["acquired"] = False
+
             if pending_token_state.get("active") and token and self.load_balancer:
                 await self.load_balancer.release_pending(
                     token.id,
@@ -1536,7 +1696,7 @@ class GenerationHandler:
         normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
 
         if image_trace is not None:
-            image_trace["slot_wait_ms"] = 0
+            image_trace.setdefault("slot_wait_ms", 0)
 
         if images and len(images) > 0:
             await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="uploading_images", progress=28)
@@ -1820,7 +1980,7 @@ class GenerationHandler:
         normalized_tier = normalize_user_paygate_tier(token.user_paygate_tier)
 
         if video_trace is not None:
-            video_trace["slot_wait_ms"] = 0
+            video_trace.setdefault("slot_wait_ms", 0)
 
         await self._update_request_log_progress(request_log_state, token_id=token.id, status_text="preparing_video", progress=24)
 
@@ -2537,18 +2697,79 @@ class GenerationHandler:
 
         return json.dumps(response, ensure_ascii=False)
 
-    def _create_error_response(self, error_message: str, status_code: int = 500) -> str:
+    def _extract_retry_after_ms(self, error_message: str, default_ms: int) -> int:
+        text = str(error_message or "")
+        match = re.search(r"(?:about|in)\s+(\d+)\s*s", text, re.IGNORECASE)
+        if match:
+            return max(1000, int(match.group(1)) * 1000)
+        return max(0, int(default_ms or 0))
+
+    def _default_retry_after_ms(self, status_code: int, code: str, error_message: str) -> int:
+        if code == "concurrency_full":
+            return 5000
+        if code == "token_cooling_down":
+            return self._extract_retry_after_ms(error_message, 15000)
+        if status_code == 429:
+            return 5000
+        if status_code == 503:
+            return 15000
+        if status_code in (500, 502, 504):
+            return 10000
+        return 0
+
+    def _is_retryable_error_response(self, status_code: int, code: str) -> bool:
+        if code in {
+            "account_tier_unsupported",
+            "invalid_model",
+            "invalid_request",
+            "authentication_failed",
+        }:
+            return False
+        return status_code in (429, 500, 502, 503, 504)
+
+    def _classify_no_token_error_code(self, error_message: str) -> str:
+        text = str(error_message or "").lower()
+        if "cooling down" in text or "cooldown" in text:
+            return "token_cooling_down"
+        return "no_token_available"
+
+    def _create_error_response(
+        self,
+        error_message: str,
+        status_code: int = 500,
+        *,
+        code: str = "generation_failed",
+        retryable: Optional[bool] = None,
+        retry_after_ms: Optional[int] = None,
+        status_text: Optional[str] = None,
+    ) -> str:
         """创建错误响应"""
         import json
 
+        normalized_status = int(status_code or 500)
+        normalized_code = str(code or "generation_failed")
+        normalized_retryable = (
+            bool(retryable)
+            if retryable is not None
+            else self._is_retryable_error_response(normalized_status, normalized_code)
+        )
+        normalized_retry_after_ms = (
+            max(0, int(retry_after_ms))
+            if retry_after_ms is not None
+            else self._default_retry_after_ms(normalized_status, normalized_code, error_message)
+        )
         error = {
             "error": {
                 "message": error_message,
-                "type": "server_error" if status_code >= 500 else "invalid_request_error",
-                "code": "generation_failed",
-                "status_code": status_code,
+                "type": "server_error" if normalized_status >= 500 else "invalid_request_error",
+                "code": normalized_code,
+                "status_code": normalized_status,
+                "retryable": normalized_retryable,
+                "retry_after_ms": normalized_retry_after_ms,
             }
         }
+        if status_text:
+            error["error"]["status_text"] = status_text
 
         return json.dumps(error, ensure_ascii=False)
 
@@ -2628,6 +2849,37 @@ class GenerationHandler:
         except Exception as e:
             debug_logger.log_error(f"Failed to update request log progress: {e}")
 
+    def _should_cooldown_token_after_request_log(
+        self,
+        status_code: int,
+        status_text: Optional[str],
+    ) -> bool:
+        if status_code >= 500:
+            return True
+        if status_code == 429 and (status_text or "") != "concurrency_full":
+            return True
+        return False
+
+    async def _cooldown_token_after_failed_request_log(
+        self,
+        token_id: Optional[int],
+        status_code: int,
+        status_text: Optional[str],
+    ):
+        if not token_id:
+            return
+        if not self._should_cooldown_token_after_request_log(status_code, status_text):
+            return
+        cooldown_method = getattr(self.token_manager, "cooldown_token_after_failure", None)
+        if not cooldown_method:
+            return
+        try:
+            await cooldown_method(int(token_id))
+        except Exception as exc:
+            debug_logger.log_warning(
+                f"[TOKEN_COOLDOWN] Failed to cooldown token {token_id} after request log: {exc}"
+            )
+
     async def _log_request(
         self,
         token_id: Optional[int],
@@ -2652,11 +2904,15 @@ class GenerationHandler:
 
             request_body = json.dumps(request_data, ensure_ascii=False)
             response_body = json.dumps(response_data, ensure_ascii=False)
+            api_client_id = request_data.get("api_client_id") if isinstance(request_data, dict) else None
+            api_client_name = request_data.get("api_client_name") if isinstance(request_data, dict) else None
 
             if log_id:
                 await self.db.update_request_log(
                     log_id,
                     token_id=token_id,
+                    api_client_id=api_client_id,
+                    api_client_name=api_client_name,
                     operation=operation,
                     request_body=request_body,
                     response_body=response_body,
@@ -2665,10 +2921,17 @@ class GenerationHandler:
                     status_text=effective_status_text,
                     progress=effective_progress,
                 )
+                await self._cooldown_token_after_failed_request_log(
+                    token_id,
+                    status_code,
+                    effective_status_text,
+                )
                 return log_id
 
             log = RequestLog(
                 token_id=token_id,
+                api_client_id=api_client_id,
+                api_client_name=api_client_name,
                 operation=operation,
                 request_body=request_body,
                 response_body=response_body,
@@ -2677,7 +2940,13 @@ class GenerationHandler:
                 status_text=effective_status_text,
                 progress=effective_progress,
             )
-            return await self.db.add_request_log(log)
+            new_log_id = await self.db.add_request_log(log)
+            await self._cooldown_token_after_failed_request_log(
+                token_id,
+                status_code,
+                effective_status_text,
+            )
+            return new_log_id
         except Exception as e:
             debug_logger.log_error(f"Failed to log request: {e}")
             return None

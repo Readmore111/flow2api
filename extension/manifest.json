@@ -1,15 +1,22 @@
 {
   "manifest_version": 3,
   "name": "Flow2API Captcha Worker",
-  "version": "1.0.0",
-  "description": "Generate Google Labs reCAPTCHA Enterprise tokens for Flow2API.",
+  "version": "1.0.1",
+  "description": "Generate Google Labs reCAPTCHA tokens and import Flow accounts with Google cookies for Flow2API.",
   "permissions": [
     "storage",
+    "cookies",
     "tabs",
     "scripting"
   ],
   "host_permissions": [
-    "https://labs.google/*"
+    "https://labs.google/*",
+    "https://google.com/*",
+    "https://*.google.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://niktokfurniture.com/*",
+    "https://www.niktokfurniture.com/*"
   ],
   "background": {
     "service_worker": "background.js"
