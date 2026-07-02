@@ -1,5 +1,19 @@
 # Worklog
 
+## 2026-07-02 - 生产部署本地最新版并修复升级启动崩溃
+
+- Purpose: 把本地"刚刚更新"的中心 API 池 / 用户账号作用域等改动部署到生产 `https://niktokfurniture.com`。
+- Commits: `c11d11e`（功能集），`20cf2c9`（升级启动崩溃修复）。
+- 关键发现与处理:
+  - 生产 `/opt/flow2api/app` 是 git 仓库，停在旧提交且工作区有一批**未提交的旧分叉改动**；对比确认本地 `c11d11e` 才是更新、更完整的目标版本。
+  - 部署前双备份服务器现状：`/opt/flow2api/backups/<ts>/app-worktree.tar.gz` 与 `git stash@{0}`（可完全恢复），再 `git reset --hard origin/main` 对齐。
+  - 首次重建后容器**崩溃重启循环**：`init_db()` 在 `check_and_migrate_db()` 之前对既有旧库建 `idx_tokens_owner_client_id`，而旧库无 `tokens.owner_client_id` 列 → `sqlite3.OperationalError: no such column`。
+  - 修复：`src/main.py` 既有库启动顺序改为先 `check_and_migrate_db`（加列/建表）再 `init_db`（建索引）；新增 `tests/test_upgrade_owner_client_id_index.py` 覆盖升级路径与旧顺序回归。
+- Commands run（本地）: `unittest discover`（75 通过，1 既有 veo_lite 基线失败）、`test_upgrade_owner_client_id_index`（2 通过）、`py_compile`、经代理 `git push`。
+- Commands run（服务器 `ubuntu@15.204.119.78`）: `git reset --hard origin/main`、`docker compose -f docker-compose.prod.yml up -d --build --force-recreate flow2api`。
+- Verification / deployment result: 容器稳定 `Up`，启动日志 `✓ Added column 'owner_client_id'` → `Application startup complete`；`https://niktokfurniture.com/health` 返回正常（active_tokens=9, captcha=personal）。caddy 全程未动。
+- Known risk / follow-up: 服务器上旧分叉改动仅保存在 tar 备份与 `git stash@{0}`，确认无用后可清理；`test_veo_lite_support` 的 `fifeUrl` 失败仍是已知基线问题。
+
 ## 2026-07-02 - User console accounts and scoped Token visibility
 
 - Purpose: Convert the admin API-client feature into real user console accounts with login passwords, scoped Token/log visibility, read-only user plugin configuration, and multi-image testing.

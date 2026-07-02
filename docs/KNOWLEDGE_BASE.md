@@ -58,6 +58,12 @@ docker compose -f /opt/flow2api/docker-compose.prod.yml ps
 docker compose -f /opt/flow2api/docker-compose.prod.yml logs --tail=100 flow2api
 ```
 
+## Deployment Gotchas
+
+- Production `/opt/flow2api/app` is a git checkout of `origin/main`. Prefer `git fetch && git reset --hard origin/main` to align it to a pushed commit, but first back up: `tar` the worktree into `/opt/flow2api/backups/<ts>/` (exclude `data/ tmp/ venv/ .git`) and/or `git stash push -u`. Production `config/setting.toml`, `data/`, and `tmp/` are volume-mounted and NOT git-tracked, so `reset --hard` does not touch runtime config or data.
+- The server worktree may hold an older uncommitted divergence from a prior manual deploy. Compare the real semantic diff with `git diff --ignore-cr-at-eol origin/main` (Windows-authored commits add CRLF noise that inflates the plain diff) before overwriting.
+- Startup DB migration ordering: on an existing database, `main.py` must call `check_and_migrate_db()` (adds missing tables/columns) BEFORE `init_db()` (builds indexes). `init_db` uses `CREATE TABLE IF NOT EXISTS`, so it never adds columns to an existing table; building an index on a not-yet-migrated column (e.g. `idx_tokens_owner_client_id` on `tokens.owner_client_id`) crashes startup with `sqlite3.OperationalError: no such column` and loops the container. Fresh DBs are unaffected because `init_db`'s CREATE TABLE already contains the column.
+
 ## DNS Notes
 
 - The domain is `niktokfurniture.com`, bought at NameSilo.
