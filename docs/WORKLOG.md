@@ -27,6 +27,7 @@
   - Started an SSH reverse tunnel from the Windows host's local proxy to the VPS loopback and a temporary server forwarder at `/tmp/flow2api_proxy_forward.py` listening on `172.18.0.1:7898` for the Docker bridge.
   - Added a UFW rule allowing only Docker bridge traffic from `172.18.0.0/16` to `172.18.0.1:7898`; this does not expose the proxy port publicly.
   - Backed up the production database before changing `captcha_config.browser_proxy_enabled=1` and `browser_proxy_url=http://172.18.0.1:7898`, then restarted `flow2api`.
+  - Committed and pushed the code fix as `eba939c`, stashed the two manually deployed production files as a backup, fast-forwarded `/opt/flow2api/app` to `origin/main`, and rebuilt/recreated `flow2api` from the Git-managed checkout.
 - Commands / checks run:
   - Local listener checks with `Get-NetTCPConnection` for `8000`, `8001`, and `9228`.
   - Local health checks against `http://127.0.0.1:8000/health` and `http://127.0.0.1:8001/health`.
@@ -37,6 +38,9 @@
   - Code searches with `rg` for image generation, captcha method routing, browser-context submission, and personal captcha resident-tab behavior.
   - `.\venv\Scripts\python.exe -m unittest tests.test_flow_image_protocol tests.test_browser_captcha_personal -v`
   - `.\venv\Scripts\python.exe -m py_compile src\services\flow_client.py src\services\browser_captcha_personal.py`
+  - `git diff --check` and a targeted secret-pattern scan over changed files.
+  - `git commit` and proxied `git push origin main`.
+  - Production `git fetch`, `git stash push`, `git pull --ff-only origin main`, and `docker compose -f docker-compose.prod.yml up -d --build --force-recreate flow2api`.
   - Container proxy test through `http://172.18.0.1:7898` to `https://www.google.com/generate_204`.
   - Production live API test against `/v1/chat/completions` with `gemini-3.1-flash-image-square`.
 - Verification result:
@@ -45,7 +49,7 @@
   - Production health returned healthy after restart.
   - Container proxy test returned HTTP 204.
   - Live production API image request returned HTTP 200 in about 46 seconds.
-  - Latest production `request_logs` row for `generate_image` recorded `progress=100`, `status_code=200`, and about 45.9 seconds duration.
+  - After rebuilding from the pushed Git commit, production stayed aligned at `eba939c`, health was green, another live API image request returned HTTP 200 in about 43.8 seconds, and the latest `request_logs` row recorded `id=556`, `progress=100`, `status_code=200`.
 - Known risk:
   - The code fix is durable, but the current production proxy path depends on the Windows host local proxy and SSH reverse tunnel staying alive. If that local proxy/tunnel stops, the VPS direct Docker browser may again hit Flow unusual-activity risk scoring.
   - For a long-running production setup, replace the temporary tunnel with a stable server-reachable browser proxy or a trusted remote-browser service. Do not write API keys, ST/AT values, Google cookies, or proxy credentials into docs.
