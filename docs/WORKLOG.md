@@ -88,6 +88,8 @@
   - mihomo config test passed and loaded 224 subscription nodes.
   - The failover timer is enabled and runs successfully.
   - Current subscription nodes did not provide any candidate that passed even the Google-only probe from the VPS; TCP sampling of 60 nodes showed only timeouts or DNS failures.
+  - The same `/clash` subscription sampled from the Windows workstation could TCP-connect to all first 60 sampled nodes, while the VPS could connect to none of the same first 60 nodes.
+  - VPS UFW default outgoing policy is `allow`, and the VPS can reach `https://www.google.com/generate_204` directly, so the failure is specific to the VPS-to-subscription-node path rather than a general server outbound firewall issue.
   - Flow2API was intentionally left on the known-working browser proxy `http://172.18.0.1:7898` instead of switching to the unusable mihomo listener `http://172.18.0.1:7899`.
 - Known risk / follow-up:
   - The server-side mihomo framework and failover automation are ready, but this specific subscription is not currently usable from the production VPS.
