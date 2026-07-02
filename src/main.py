@@ -98,17 +98,22 @@ async def lifespan(app: FastAPI):
     # Check if database exists (determine if first startup)
     is_first_startup = not db.db_exists()
 
-    # Initialize database tables structure
-    await db.init_db()
-
     # Handle database initialization based on startup type
     if is_first_startup:
+        # Fresh database: build the full schema (tables + indexes) then seed config.
+        await db.init_db()
         print("First startup detected. Initializing database and configuration from setting.toml...")
         await db.init_config_from_toml(config_dict, is_first_startup=True)
         print("Database and configuration initialized successfully.")
     else:
+        # Existing database: run schema migration (add missing tables/columns)
+        # BEFORE init_db builds indexes. Otherwise indexes on newly added columns
+        # (e.g. idx_tokens_owner_client_id on tokens.owner_client_id) crash with
+        # "no such column" when upgrading a database created by an older version.
         print("Existing database detected. Checking for missing tables and columns...")
         await db.check_and_migrate_db(config_dict)
+        # Initialize database tables structure (indexes now safe to create).
+        await db.init_db()
         print("Database migration check completed.")
 
     # 启动时统一把数据库配置同步到内存，避免 personal/brower 相关运行时配置遗漏。
