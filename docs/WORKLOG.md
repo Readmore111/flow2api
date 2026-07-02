@@ -54,6 +54,45 @@
   - The code fix is durable, but the current production proxy path depends on the Windows host local proxy and SSH reverse tunnel staying alive. If that local proxy/tunnel stops, the VPS direct Docker browser may again hit Flow unusual-activity risk scoring.
   - For a long-running production setup, replace the temporary tunnel with a stable server-reachable browser proxy or a trusted remote-browser service. Do not write API keys, ST/AT values, Google cookies, or proxy credentials into docs.
 
+## 2026-07-02 - Server-side mihomo proxy and Flow-aware failover
+
+- Purpose: Move the browser proxy plan toward a server-side subscription proxy and add automatic node failover/rotation for frequent image-generation failures.
+- Files changed:
+  - `src/services/mihomo_failover.py`
+  - `tests/test_mihomo_failover.py`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Server changes:
+  - Installed `mihomo` on the production VPS and created root-only config under `/root/flow2api-proxy/`.
+  - Stored the provided subscription URL in a root-only file and fetched the Clash-format variant without writing node credentials into Git/docs.
+  - Generated a mihomo config with the selector group `FLOW2API`, HTTP/SOCKS mixed proxy on `172.18.0.1:7899`, and local controller on `127.0.0.1:9090`.
+  - Added a UFW rule allowing only Docker bridge traffic from `172.18.0.0/16` to `172.18.0.1:7899`; the proxy port is not exposed publicly.
+  - Added `mihomo-flow2api.service`.
+  - Added `flow2api-proxy-failover.service` and `flow2api-proxy-failover.timer`.
+- Failover behavior:
+  - The failover script reads recent `request_logs` and switches nodes only after frequent matching image-generation failures.
+  - It also supports scheduled rotation so one node is not used forever.
+  - A candidate node must pass both Google connectivity and the Flow page probe before it can be selected.
+  - Failed probe candidates are temporarily cooled down to avoid repeatedly trying known-bad nodes.
+  - Journal output masks current/selected node names.
+- Verification run:
+  - `.\venv\Scripts\python.exe -m unittest tests.test_mihomo_failover -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\services\mihomo_failover.py`
+  - `mihomo -t` against the generated server config.
+  - systemd status checks for `mihomo-flow2api.service` and `flow2api-proxy-failover.timer`.
+  - Production health check against `https://niktokfurniture.com/health`.
+  - Server-side node checks using mihomo controller delay probes and TCP sampling.
+- Verification result:
+  - New failover tests passed: 5 tests.
+  - Python compile passed.
+  - mihomo config test passed and loaded 224 subscription nodes.
+  - The failover timer is enabled and runs successfully.
+  - Current subscription nodes did not provide any candidate that passed even the Google-only probe from the VPS; TCP sampling of 60 nodes showed only timeouts or DNS failures.
+  - Flow2API was intentionally left on the known-working browser proxy `http://172.18.0.1:7898` instead of switching to the unusable mihomo listener `http://172.18.0.1:7899`.
+- Known risk / follow-up:
+  - The server-side mihomo framework and failover automation are ready, but this specific subscription is not currently usable from the production VPS.
+  - Provide a different Clash/mihomo subscription or server-reachable nodes, then rerun the Google+Flow probe before changing `captcha_config.browser_proxy_url` to `http://172.18.0.1:7899`.
+
 ## 2026-07-02 - 生产部署本地最新版并修复升级启动崩溃
 
 - Purpose: 把本地"刚刚更新"的中心 API 池 / 用户账号作用域等改动部署到生产 `https://niktokfurniture.com`。

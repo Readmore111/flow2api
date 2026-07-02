@@ -74,6 +74,15 @@ docker compose -f /opt/flow2api/docker-compose.prod.yml logs --tail=100 flow2api
 - Flow unusual-activity scoring can still reject a browser-context submit if the production Docker browser uses a high-risk VPS direct IP/fingerprint. If the web UI works from the user's real browser but production fails at 48%, test a browser proxy that matches the successful user environment before assuming the Flow API protocol changed.
 - Browser proxy config for `browser`/`personal` modes is stored in `captcha_config.browser_proxy_enabled` and `captcha_config.browser_proxy_url`. In production on 2026-07-02, a Docker-reachable proxy listener at `http://172.18.0.1:7898` restored image generation, but that listener depends on a Windows local proxy plus SSH reverse tunnel and should be replaced by a durable server-reachable proxy for long-running use.
 - Docker containers cannot reach a host-only SSH reverse tunnel bound to server `127.0.0.1`. If a temporary host tunnel must be used, expose it only on the Docker bridge address and restrict firewall access to the Docker subnet; never open such a proxy publicly.
+- Production has a server-side mihomo framework for future durable browser proxy use:
+  - Config directory: `/root/flow2api-proxy/` (root-only; contains subscription-derived node material and the controller secret).
+  - Service: `mihomo-flow2api.service`.
+  - Docker-reachable listener: `http://172.18.0.1:7899`.
+  - Controller: `http://127.0.0.1:9090` with a root-only secret.
+  - Selector group: `FLOW2API`.
+  - UFW should allow only Docker bridge traffic from `172.18.0.0/16` to `172.18.0.1:7899`.
+- Production also has `flow2api-proxy-failover.timer`, which runs `src/services/mihomo_failover.py` every few minutes. It reads `request_logs`, switches nodes after frequent matching image-generation failures, and supports scheduled rotation. A candidate node must pass both `https://www.google.com/generate_204` and `https://labs.google/fx/zh/tools/flow` through mihomo before it can be selected.
+- Do not point `captcha_config.browser_proxy_url` at the mihomo listener until at least one node passes the Google+Flow probes. On 2026-07-02, the supplied subscription loaded 224 nodes but none passed even Google-only probing from the VPS, so production stayed on the working temporary proxy at `http://172.18.0.1:7898`.
 - When diagnosing Flow web/API drift through Chrome remote debugging, keep the inspection read-only unless the user explicitly approves a live generation. Do not store Authorization headers, cookies, AT/ST values, Google API keys, or proxy credentials in docs or logs.
 - Useful high-level health distinction: if `/health` shows `backend_running=true`, `has_active_tokens=true`, and active Tokens are present, but request logs fail at 48% with unusual-activity errors, the production service is probably running and the next investigation target is upstream risk scoring or request-context mismatch.
 
