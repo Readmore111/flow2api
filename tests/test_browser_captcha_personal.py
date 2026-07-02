@@ -2,7 +2,7 @@ import itertools
 import json
 import types
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from src.services.browser_captcha_personal import (
     BrowserCaptchaService,
@@ -106,6 +106,140 @@ class BrowserCaptchaPersonalTests(unittest.IsolatedAsyncioTestCase):
         token = await self.service._execute_recaptcha_on_tab(tab, action="IMAGE_GENERATION")
 
         self.assertEqual(token, "token-xyz")
+
+    async def test_submit_flow_request_executes_fetch_on_resident_tab(self):
+        tab = _ClosableFakeTab()
+        resident_info = ResidentTabInfo(
+            tab=tab,
+            slot_id="slot-1",
+            project_id="project-1",
+            token_id=7,
+        )
+        resident_info.recaptcha_ready = True
+        payload = {
+            "clientContext": {
+                "projectId": "project-1",
+                "recaptchaContext": {"token": "old-token"},
+            },
+            "requests": [
+                {"clientContext": {"recaptchaContext": {"token": "old-token"}}}
+            ],
+        }
+        response_payload = {
+            "ok": True,
+            "status": 200,
+            "text": json.dumps({"media": [{"id": "image-1"}]}),
+            "headers": {"content-type": "application/json"},
+            "token": "fresh-token",
+        }
+
+        self.service._wait_for_pending_fresh_profile_restart_before_solve = AsyncMock(return_value=True)
+        self.service.initialize = AsyncMock()
+        self.service._ensure_resident_tab = AsyncMock(return_value=("slot-1", resident_info))
+        self.service._ensure_resident_token_binding = AsyncMock(return_value=True)
+        self.service._consume_resident_slot_reservation = AsyncMock()
+        self.service._release_resident_slot_reservation = AsyncMock()
+        self.service._tab_evaluate = AsyncMock(return_value=response_payload)
+        self.service._refresh_last_fingerprint = AsyncMock(return_value={"user_agent": "ua-from-tab"})
+        self.service._cache_session_cookies_for_computed = AsyncMock()
+        self.service._maybe_execute_pending_fresh_profile_restart = AsyncMock(return_value=False)
+
+        result = await self.service.submit_flow_request(
+            project_id="project-1",
+            action="IMAGE_GENERATION",
+            token_id=7,
+            url="https://aisandbox-pa.googleapis.com/v1/projects/project-1/flowMedia:batchGenerateImages",
+            at_token="at-token",
+            json_data=payload,
+            timeout=30,
+        )
+
+        self.assertEqual(result, (response_payload, "personal:slot-1", {"user_agent": "ua-from-tab"}))
+        self.service._tab_evaluate.assert_awaited_once()
+        script = self.service._tab_evaluate.await_args.args[1]
+        self.assertIn("grecaptcha.enterprise.execute", script)
+        self.assertIn("fetch(targetUrl", script)
+        self.service._consume_resident_slot_reservation.assert_awaited_once_with(
+            "slot-1",
+            resident_info=resident_info,
+        )
+        self.service._release_resident_slot_reservation.assert_not_awaited()
+
+    async def test_load_token_cookie_reads_google_cookies_field(self):
+        class FakeDb:
+            async def get_token(self, token_id):
+                self.token_id = token_id
+                return types.SimpleNamespace(google_cookies="cookie-json")
+
+        fake_db = FakeDb()
+        self.service.db = fake_db
+
+        cookie_text = await self.service._load_token_cookie(7)
+
+        self.assertEqual(cookie_text, "cookie-json")
+        self.assertEqual(fake_db.token_id, 7)
+
+    async def test_persist_context_cookies_writes_google_cookies_field(self):
+        tab = _ClosableFakeTab()
+        resident_info = ResidentTabInfo(
+            tab=tab,
+            slot_id="slot-1",
+            project_id="project-1",
+            token_id=7,
+            browser_context_id="context-1",
+        )
+        fake_db = types.SimpleNamespace(update_token=AsyncMock())
+        self.service.db = fake_db
+        self.service._get_browser_cookies = AsyncMock(return_value=[
+            {
+                "name": "AEC",
+                "value": "value-1",
+                "domain": ".google.com",
+                "path": "/",
+                "secure": True,
+            }
+        ])
+        self.service._load_token_cookie = AsyncMock(return_value="")
+
+        result = await self.service._persist_context_cookies_to_token(
+            resident_info,
+            7,
+            label="unit-test",
+        )
+
+        self.assertTrue(result)
+        fake_db.update_token.assert_awaited_once()
+        self.assertIn("google_cookies", fake_db.update_token.await_args.kwargs)
+        self.assertNotIn("cookie", fake_db.update_token.await_args.kwargs)
+
+    async def test_set_browser_cookie_targets_falls_back_when_context_missing(self):
+        calls = []
+
+        class FakeBrowser:
+            async def send(self, command):
+                if command["browser_context_id"] == "missing-context":
+                    raise RuntimeError("Failed to find browser context for id missing-context")
+                return {"ok": True}
+
+        def fake_set_cookies(cookie_params, browser_context_id=None):
+            calls.append(browser_context_id)
+            return {
+                "cookie_params": cookie_params,
+                "browser_context_id": browser_context_id,
+            }
+
+        self.service.browser = FakeBrowser()
+        self.service._build_cdp_cookie_params = lambda _cookies: ["cookie-param"]
+
+        with patch("nodriver.cdp.storage.set_cookies", side_effect=fake_set_cookies):
+            count = await self.service._set_browser_cookie_targets(
+                [{"name": "AEC", "value": "value-1", "domain": ".google.com"}],
+                label="unit-test",
+                browser_context_id="missing-context",
+            )
+
+        self.assertEqual(count, 1)
+        self.assertEqual(calls, ["missing-context", None])
 
     async def test_create_resident_tab_returns_none_when_browser_missing(self):
         self.service.browser = None

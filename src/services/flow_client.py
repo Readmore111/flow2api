@@ -1115,8 +1115,11 @@ class FlowClient:
                     "used_media_proxy": bool(prefer_media_proxy),
                 }
             try:
-                if config.captcha_method == "browser" and project_id:
-                    from .browser_captcha import BrowserCaptchaService
+                if config.captcha_method in {"browser", "personal"} and project_id:
+                    if config.captcha_method == "personal":
+                        from .browser_captcha_personal import BrowserCaptchaService
+                    else:
+                        from .browser_captcha import BrowserCaptchaService
 
                     service = await BrowserCaptchaService.get_instance(self.db)
                     response_payload, _browser_ref, fingerprint = await service.submit_flow_request(

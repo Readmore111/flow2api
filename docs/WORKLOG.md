@@ -1,5 +1,55 @@
 # Worklog
 
+## 2026-07-02 - Flow image API personal-mode recovery
+
+- Purpose: Fix API image generation failures where the web Flow UI still generated successfully, but production API requests failed at 48% with `PUBLIC_ERROR_UNUSUAL_ACTIVITY_TOO_MUCH_TRAFFIC`.
+- Root cause findings:
+  - Production `https://niktokfurniture.com/health` was reachable with `backend_running=true`, `has_active_tokens=true`, `total_tokens=9`, `active_tokens=9`, and `captcha_method=personal`; this was not a backend outage or empty Token pool.
+  - The local Windows workspace was not the live instance shown in the screenshot: no local Flow2API listener was found on `127.0.0.1:8000` or `127.0.0.1:8001`, Docker Desktop was not running, and local request logs were older than the screenshot.
+  - The screenshot failures stopped at progress `48%`, which maps to `generate_image()` after reCAPTCHA is obtained and just before/while submitting `flowMedia:batchGenerateImages`.
+  - Read-only inspection of the Chrome remote debugging browser on `127.0.0.1:9228` showed the web Flow page still uses the Flow/aisandbox API family, the `IMAGE_GENERATION` action, and current Next.js Flow bundles. No evidence was found that the image endpoint was replaced.
+  - `browser` captcha mode already submitted Flow requests inside the browser context with `grecaptcha.enterprise.execute(...)` plus page-side `fetch(..., credentials: "include")`; `personal` mode only solved reCAPTCHA in the browser and then submitted from the backend HTTP client. That mixed browser-token/backend-submit path was a code-level risk trigger.
+  - After fixing the code path, production still failed when the Docker browser used the VPS direct IP. Enabling a Docker-reachable browser proxy through the user's working local proxy/tunnel removed the upstream rejection.
+- Files changed:
+  - `src/services/flow_client.py`
+  - `src/services/browser_captcha_personal.py`
+  - `tests/test_flow_image_protocol.py`
+  - `tests/test_browser_captcha_personal.py`
+  - `docs/WORKLOG.md`
+  - `docs/KNOWLEDGE_BASE.md`
+- Behavior changed:
+  - `personal` image generation now routes through `BrowserCaptchaService.submit_flow_request(...)`, matching the browser-context submit path used by `browser` mode.
+  - `browser_captcha_personal` now executes reCAPTCHA and submits the Flow image request from the same resident browser tab, using page-side `fetch` with `credentials: "include"`.
+  - Personal-mode cookie binding now reads and writes `token.google_cookies` instead of the legacy `token.cookie` field, with a read fallback to the legacy field.
+  - CDP cookie injection now retries against the global cookie jar if a stale `browser_context_id` returns `Failed to find browser context`.
+- Production operational changes:
+  - Deployed the changed Python files to `/opt/flow2api/app` and rebuilt/recreated only the `flow2api` service; `flow2api-caddy` stayed running.
+  - Started an SSH reverse tunnel from the Windows host's local proxy to the VPS loopback and a temporary server forwarder at `/tmp/flow2api_proxy_forward.py` listening on `172.18.0.1:7898` for the Docker bridge.
+  - Added a UFW rule allowing only Docker bridge traffic from `172.18.0.0/16` to `172.18.0.1:7898`; this does not expose the proxy port publicly.
+  - Backed up the production database before changing `captcha_config.browser_proxy_enabled=1` and `browser_proxy_url=http://172.18.0.1:7898`, then restarted `flow2api`.
+- Commands / checks run:
+  - Local listener checks with `Get-NetTCPConnection` for `8000`, `8001`, and `9228`.
+  - Local health checks against `http://127.0.0.1:8000/health` and `http://127.0.0.1:8001/health`.
+  - Docker status check with `docker ps`.
+  - Production health check against `https://niktokfurniture.com/health`.
+  - Authentication sanity check against `https://niktokfurniture.com/v1/models` with an invalid bearer token.
+  - Read-only Chrome DevTools Protocol inspection of `127.0.0.1:9228` page targets, loaded Flow resources, and initialization request shape. Sensitive headers and keys were not recorded.
+  - Code searches with `rg` for image generation, captcha method routing, browser-context submission, and personal captcha resident-tab behavior.
+  - `.\venv\Scripts\python.exe -m unittest tests.test_flow_image_protocol tests.test_browser_captcha_personal -v`
+  - `.\venv\Scripts\python.exe -m py_compile src\services\flow_client.py src\services\browser_captcha_personal.py`
+  - Container proxy test through `http://172.18.0.1:7898` to `https://www.google.com/generate_204`.
+  - Production live API test against `/v1/chat/completions` with `gemini-3.1-flash-image-square`.
+- Verification result:
+  - Targeted unit tests passed: 21 tests.
+  - Python compile checks passed for the changed runtime files.
+  - Production health returned healthy after restart.
+  - Container proxy test returned HTTP 204.
+  - Live production API image request returned HTTP 200 in about 46 seconds.
+  - Latest production `request_logs` row for `generate_image` recorded `progress=100`, `status_code=200`, and about 45.9 seconds duration.
+- Known risk:
+  - The code fix is durable, but the current production proxy path depends on the Windows host local proxy and SSH reverse tunnel staying alive. If that local proxy/tunnel stops, the VPS direct Docker browser may again hit Flow unusual-activity risk scoring.
+  - For a long-running production setup, replace the temporary tunnel with a stable server-reachable browser proxy or a trusted remote-browser service. Do not write API keys, ST/AT values, Google cookies, or proxy credentials into docs.
+
 ## 2026-07-02 - 生产部署本地最新版并修复升级启动崩溃
 
 - Purpose: 把本地"刚刚更新"的中心 API 池 / 用户账号作用域等改动部署到生产 `https://niktokfurniture.com`。

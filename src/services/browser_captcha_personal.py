@@ -6,6 +6,7 @@
 import asyncio
 import base64
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 import gc
@@ -6776,7 +6777,9 @@ class BrowserCaptchaService:
         except Exception as e:
             debug_logger.log_warning(f"[BrowserCaptcha] 读取 token cookie 失败 (token_id={token_key}): {e}")
             return None
-        cookie_text = str(getattr(token, "cookie", "") or "").strip() if token else ""
+        cookie_text = str(getattr(token, "google_cookies", "") or "").strip() if token else ""
+        if not cookie_text and token:
+            cookie_text = str(getattr(token, "cookie", "") or "").strip()
         return cookie_text or None
 
     def _build_cdp_cookie_params(self, browser_cookies: Iterable[Dict[str, Any]]) -> list[Any]:
@@ -6843,19 +6846,30 @@ class BrowserCaptchaService:
 
         from nodriver import cdp
 
-        if browser_context_id is None:
-            cookie_command = cdp.storage.set_cookies(cookie_params)
-        else:
-            cookie_command = cdp.storage.set_cookies(
-                cookie_params,
-                browser_context_id=browser_context_id,
+        async def send_cookie_command(context_id: Any = None):
+            if context_id is None:
+                cookie_command = cdp.storage.set_cookies(cookie_params)
+            else:
+                cookie_command = cdp.storage.set_cookies(
+                    cookie_params,
+                    browser_context_id=context_id,
+                )
+            return await self._run_with_timeout(
+                self.browser.send(cookie_command),
+                timeout_seconds=timeout_seconds,
+                label=label,
             )
 
-        await self._run_with_timeout(
-            self.browser.send(cookie_command),
-            timeout_seconds=timeout_seconds,
-            label=label,
-        )
+        try:
+            await send_cookie_command(browser_context_id)
+        except Exception as e:
+            error_text = str(e)
+            if browser_context_id is None or "Failed to find browser context" not in error_text:
+                raise
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] 按 context 写入 cookies 失败，回退全局 cookie jar ({label}): {e}"
+            )
+            await send_cookie_command(None)
         return len(cookie_params)
 
     async def _apply_configured_browser_startup_cookie(
@@ -7047,14 +7061,14 @@ class BrowserCaptchaService:
             merged_signature = self._normalize_cookie_signature(merged_cookie_text)
 
             if previous_storage_text != merged_cookie_text:
-                await self.db.update_token(int(token_key), cookie=merged_cookie_text)
+                await self.db.update_token(int(token_key), google_cookies=merged_cookie_text)
                 debug_logger.log_info(
-                    f"[BrowserCaptcha] 已回填 context cookies 到 token.cookie "
+                    f"[BrowserCaptcha] 已回填 context cookies 到 token.google_cookies "
                     f"(slot={resident_info.slot_id}, token_id={token_key}, cookies={len(serialized_cookies)})"
                 )
             else:
                 debug_logger.log_info(
-                    f"[BrowserCaptcha] context cookies 与 token.cookie 一致，跳过写回 "
+                    f"[BrowserCaptcha] context cookies 与 token.google_cookies 一致，跳过写回 "
                     f"(slot={resident_info.slot_id}, token_id={token_key}, cookies={len(serialized_cookies)})"
                 )
 
@@ -7064,7 +7078,7 @@ class BrowserCaptchaService:
             return True
         except Exception as e:
             debug_logger.log_warning(
-                f"[BrowserCaptcha] 回填 context cookies 到 token.cookie 失败 "
+                f"[BrowserCaptcha] 回填 context cookies 到 token.google_cookies 失败 "
                 f"(slot={resident_info.slot_id}, token_id={token_key}): {e}"
             )
             return False
@@ -11369,6 +11383,267 @@ class BrowserCaptchaService:
             session_cookies=session_cookies,
         )
 
+    async def _submit_flow_request_with_resident_tab(
+        self,
+        slot_id: str,
+        project_id: str,
+        resident_info: Optional[ResidentTabInfo],
+        action: str,
+        url: str,
+        at_token: str,
+        json_data: Dict[str, Any],
+        timeout: int,
+        *,
+        consume_reservation: bool = False,
+    ) -> tuple[Dict[str, Any], str, Optional[Dict[str, Any]]]:
+        """在同一个常驻标签页中完成 reCAPTCHA 和 Flow 请求提交。"""
+        if not resident_info or not resident_info.tab or not resident_info.recaptcha_ready:
+            if consume_reservation:
+                await self._release_resident_slot_reservation(slot_id, resident_info=resident_info)
+            raise RuntimeError("personal resident tab is not ready for Flow submit")
+
+        payload_for_submit = deepcopy(json_data)
+        submit_timeout_ms = max(5000, int(float(timeout or 30) * 1000))
+        script = f"""
+            (async () => {{
+                const websiteKey = {json.dumps(self.website_key)};
+                const actionName = {json.dumps(action)};
+                const targetUrl = {json.dumps(url)};
+                const bearerToken = {json.dumps(at_token)};
+                const payload = {json.dumps(payload_for_submit, ensure_ascii=False)};
+                const timeoutMs = {submit_timeout_ms};
+
+                const solveToken = () => new Promise((resolve, reject) => {{
+                    const timer = setTimeout(() => reject(new Error('captcha_timeout')), 25000);
+                    try {{
+                        grecaptcha.enterprise.ready(() => {{
+                            grecaptcha.enterprise.execute(websiteKey, {{ action: actionName }})
+                                .then((token) => {{
+                                    clearTimeout(timer);
+                                    resolve(token);
+                                }})
+                                .catch((error) => {{
+                                    clearTimeout(timer);
+                                    reject(error);
+                                }});
+                        }});
+                    }} catch (error) {{
+                        clearTimeout(timer);
+                        reject(error);
+                    }}
+                }});
+
+                const patchToken = (value, token) => {{
+                    if (!value) return;
+                    if (Array.isArray(value)) {{
+                        value.forEach((item) => patchToken(item, token));
+                        return;
+                    }}
+                    if (typeof value !== 'object') return;
+                    if (value.recaptchaContext && typeof value.recaptchaContext === 'object') {{
+                        value.recaptchaContext.token = token;
+                        if (!value.recaptchaContext.applicationType) {{
+                            value.recaptchaContext.applicationType = 'RECAPTCHA_APPLICATION_TYPE_WEB';
+                        }}
+                    }}
+                    Object.values(value).forEach((item) => patchToken(item, token));
+                }};
+
+                const token = await solveToken();
+                const body = typeof structuredClone === 'function'
+                    ? structuredClone(payload)
+                    : JSON.parse(JSON.stringify(payload));
+                patchToken(body, token);
+
+                const controller = new AbortController();
+                const abortTimer = setTimeout(() => controller.abort('flow_fetch_timeout'), timeoutMs);
+                try {{
+                    const response = await fetch(targetUrl, {{
+                        method: 'POST',
+                        headers: {{
+                            'authorization': `Bearer ${{bearerToken}}`,
+                            'content-type': 'text/plain;charset=UTF-8',
+                        }},
+                        credentials: 'include',
+                        body: JSON.stringify(body),
+                        signal: controller.signal,
+                    }});
+                    const text = await response.text();
+                    const headers = {{}};
+                    response.headers.forEach((value, key) => {{
+                        headers[key] = value;
+                    }});
+                    return {{
+                        ok: response.ok,
+                        status: response.status,
+                        text,
+                        headers,
+                        token,
+                    }};
+                }} finally {{
+                    clearTimeout(abortTimer);
+                }}
+            }})()
+        """
+
+        start_time = time.time()
+        async with resident_info.solve_lock:
+            if consume_reservation:
+                await self._consume_resident_slot_reservation(slot_id, resident_info=resident_info)
+            response_payload = await self._tab_evaluate(
+                resident_info.tab,
+                script,
+                label=f"resident_submit_flow:{slot_id}:{project_id}:{action}",
+                timeout_seconds=max(35.0, float(timeout or 30) + 10.0),
+                await_promise=True,
+                return_by_value=True,
+            )
+
+        if not isinstance(response_payload, dict):
+            raise RuntimeError("personal browser Flow submit returned invalid payload")
+
+        resident_info.last_used_at = time.time()
+        resident_info.use_count += 1
+        browser_solve_count = self._record_browser_solve_success(
+            source="resident_submit",
+            project_id=project_id,
+        )
+        self._remember_project_affinity(project_id, slot_id, resident_info)
+        self._resident_error_streaks.pop(slot_id, None)
+        self._mark_browser_health(True)
+        resident_info.fingerprint = await self._refresh_last_fingerprint(resident_info.tab)
+        self._remember_fingerprint(resident_info.fingerprint)
+        try:
+            await self._cache_session_cookies_for_computed(resident_info)
+        except Exception as cookie_error:
+            debug_logger.log_warning(
+                f"[BrowserCaptcha] 浏览器内提交后提取 session cookies 失败 "
+                f"(slot={slot_id}, project={project_id}, token_id={resident_info.token_id}): {cookie_error}"
+            )
+        debug_logger.log_info(
+            "[BrowserCaptcha] ✅ 浏览器内 Flow 图片提交完成"
+            f"（slot={slot_id}, 耗时 {(time.time() - start_time) * 1000:.0f}ms, "
+            f"status={response_payload.get('status')}, browser_solve_count={browser_solve_count}）"
+        )
+        await self._maybe_execute_pending_fresh_profile_restart(
+            project_id,
+            token_id=resident_info.token_id,
+            source="resident_submit_success",
+        )
+        fingerprint = (
+            dict(resident_info.fingerprint)
+            if isinstance(resident_info.fingerprint, dict) and resident_info.fingerprint
+            else self.get_last_fingerprint()
+        )
+        return response_payload, f"personal:{slot_id}", fingerprint
+
+    async def submit_flow_request(
+        self,
+        project_id: str,
+        action: str,
+        token_id: Optional[int],
+        url: str,
+        at_token: str,
+        json_data: Dict[str, Any],
+        timeout: int,
+    ) -> tuple[Dict[str, Any], str, Optional[Dict[str, Any]]]:
+        """personal 模式下在同一浏览器标签页内完成打码并提交 Flow 请求。"""
+        debug_logger.log_info(
+            f"[BrowserCaptcha] 浏览器内提交 Flow 请求: action={action}, project_id={project_id}, token_id={token_id}"
+        )
+        self._mark_runtime_active()
+        await self._wait_for_pending_fresh_profile_restart_before_solve(
+            project_id,
+            token_id=token_id,
+            source="submit_flow_pre_initialize",
+        )
+        await self.initialize()
+        await self._wait_for_pending_fresh_profile_restart_before_solve(
+            project_id,
+            token_id=token_id,
+            source="submit_flow_pre_resident_pick",
+        )
+
+        reserved_slot_id: Optional[str] = None
+
+        async def release_reserved_slot():
+            nonlocal reserved_slot_id
+            if reserved_slot_id:
+                await self._release_resident_slot_reservation(reserved_slot_id)
+                reserved_slot_id = None
+
+        try:
+            slot_id, resident_info = await self._ensure_resident_tab(
+                project_id,
+                token_id=token_id,
+                reserve_for_solve=True,
+                return_slot_key=True,
+            )
+            reserved_slot_id = slot_id or None
+
+            if resident_info and resident_info.tab:
+                cookie_bound = await self._ensure_resident_token_binding(
+                    resident_info,
+                    token_id,
+                    label=f"submit_flow:{slot_id}",
+                )
+                if not cookie_bound:
+                    await self._mark_resident_slot_unavailable(
+                        slot_id,
+                        resident_info,
+                        reason=f"submit_flow_cookie_binding:{project_id}",
+                    )
+                    raise RuntimeError("personal resident tab cookie binding failed")
+
+            if resident_info and resident_info.tab and not resident_info.recaptcha_ready:
+                await self._mark_resident_slot_unavailable(
+                    slot_id,
+                    resident_info,
+                    reason=f"submit_flow_cold_slot:{project_id}",
+                )
+                await release_reserved_slot()
+                slot_id, resident_info = await self._rebuild_resident_tab(
+                    project_id,
+                    token_id=token_id,
+                    slot_id=slot_id,
+                    reserve_for_solve=True,
+                    return_slot_key=True,
+                )
+                reserved_slot_id = slot_id or None
+
+            if not resident_info or not slot_id:
+                raise RuntimeError("personal resident tab unavailable for Flow submit")
+
+            try:
+                response_payload, browser_ref, fingerprint = await self._submit_flow_request_with_resident_tab(
+                    slot_id,
+                    project_id,
+                    resident_info,
+                    action,
+                    url,
+                    at_token,
+                    json_data,
+                    timeout,
+                    consume_reservation=True,
+                )
+                reserved_slot_id = None
+                return response_payload, browser_ref, fingerprint
+            except Exception as submit_error:
+                reserved_slot_id = None
+                await self._mark_resident_slot_unavailable(
+                    slot_id,
+                    resident_info,
+                    reason=f"submit_flow_error:{project_id}",
+                )
+                if self._is_browser_runtime_error(submit_error):
+                    await self._recover_browser_runtime(
+                        project_id,
+                        reason=f"submit_flow:{slot_id}",
+                    )
+                raise
+        finally:
+            await release_reserved_slot()
+
     async def _create_resident_tab(
         self,
         slot_id: str,
@@ -13793,6 +14068,74 @@ class _PersonalBrowserPoolService:
             "issued_at": lease.created_at,
             "expires_at": lease.expires_at,
         }
+
+    async def submit_flow_request(
+        self,
+        project_id: str,
+        action: str,
+        token_id: Optional[int],
+        url: str,
+        at_token: str,
+        json_data: Dict[str, Any],
+        timeout: int,
+    ) -> tuple[Dict[str, Any], str, Optional[Dict[str, Any]]]:
+        await self._ensure_workers()
+        if not self._workers:
+            raise RuntimeError("没有可用的 personal 浏览器实例")
+
+        excluded_indexes: set[int] = set()
+        max_attempts = min(len(self._workers), 3)
+        last_error: Optional[Exception] = None
+
+        for _ in range(max_attempts):
+            worker_index = None
+            worker = None
+            try:
+                worker_index, worker = await self._acquire_worker(
+                    project_id=project_id,
+                    token_id=token_id,
+                    excluded_indexes=excluded_indexes,
+                )
+                excluded_indexes.add(worker_index)
+                response_payload, browser_ref, fingerprint = await worker.submit_flow_request(
+                    project_id=project_id,
+                    action=action,
+                    token_id=token_id,
+                    url=url,
+                    at_token=at_token,
+                    json_data=json_data,
+                    timeout=timeout,
+                )
+            except Exception as e:
+                last_error = e
+                worker_label = worker_index + 1 if worker_index is not None else "unknown"
+                debug_logger.log_warning(
+                    f"[BrowserCaptchaPool] 浏览器内提交 Flow 请求失败，尝试切换其他实例 (worker={worker_label}): {e}"
+                )
+                if BrowserCaptchaService._is_memory_pressure_browser_launch_error(e):
+                    await self._reclaim_pool_memory_pressure(
+                        reason=f"submit_flow:{project_id or '<empty>'}",
+                        exclude_indexes=excluded_indexes,
+                    )
+                continue
+            finally:
+                await self._release_worker_reservation(worker_index)
+
+            self._last_successful_worker_index = worker_index
+            slot_id = None
+            if isinstance(browser_ref, str) and browser_ref.startswith("personal:"):
+                slot_id = browser_ref.split(":", 1)[1] or None
+            self._remember_affinity(
+                project_id=project_id,
+                token_id=token_id,
+                slot_id=slot_id,
+                worker_index=worker_index,
+            )
+            return response_payload, browser_ref, fingerprint
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("personal 浏览器内提交 Flow 请求失败")
 
     async def report_flow_error(
         self,
